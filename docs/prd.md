@@ -64,15 +64,20 @@ The MVP focuses on a single-country rule set (Poland), no broker integrations, a
   - Group transactions by ISIN and sort by time.
 
 - **Tax calculation (Poland PIT-38)** (Priority: P0)
-  - Match sells to buys by ISIN using FIFO.
-  - Compute taxable income and cost basis in PLN using public FX rates per transaction date.
+  - Match sells to buys by ISIN using FIFO based on trade date.
+  - Include transaction costs (commissions, fees) in cost basis calculation.
+  - Compute taxable income and cost basis in PLN using NBP official exchange rates per trade date.
+  - Apply Polish tax authority rounding rules (2 decimal places for PLN amounts).
   - Calculate total gains, losses, and net taxable amount for the reporting year.
   - Send an error summary email if calculation fails.
 
 - **Human-readable summary** (Priority: P0)
   - Provide a final tax amount and a plain-language explanation of how it was calculated.
-  - Include a breakdown by ISIN and transaction-level totals.
-  - Clearly list assumptions (FIFO, exchange rate usage, year boundary).
+  - Include a breakdown by ISIN showing each matched buy-sell pair.
+  - Show transaction costs included in calculations.
+  - Display NBP exchange rates used for each transaction.
+  - Clearly list assumptions (FIFO, exchange rate source, trade date usage, year boundary).
+  - Include disclaimer that calculation is for informational purposes.
 
 - **Email delivery** (Priority: P0)
   - Send the summary to the specified email address.
@@ -106,8 +111,11 @@ The MVP focuses on a single-country rule set (Poland), no broker integrations, a
 
 - Partial fills and multiple buys matched to a single sell.
 - Multiple currencies in a single file with per-row currencies.
-- Transactions outside the reporting year are excluded.
-- Missing FX rate for a transaction date triggers a failure email.
+- Transactions outside the reporting year are excluded from calculation.
+- Transaction costs (commissions, fees) included in gain/loss calculation.
+- Missing NBP rate for a transaction date uses fallback logic.
+- Corporate actions (splits, dividends) require manual exclusion from input file in MVP.
+- Same-day buy and sell transactions handled correctly by FIFO ordering.
 
 ### 5.4 UI/UX highlights
 
@@ -140,7 +148,8 @@ An investor uploads their annual order history, the system validates it, applies
 
 - Object storage for input files (e.g., AWS S3).
 - Email service for summary delivery.
-- Public FX rate API for PLN conversion by date.
+- National Bank of Poland (NBP) API for official PLN exchange rates by date.
+- Fallback mechanism when NBP rate unavailable (send failure email).
 
 ### 8.2 Data storage & privacy
 
@@ -158,24 +167,95 @@ An investor uploads their annual order history, the system validates it, applies
 - FX API availability or missing historical rates.
 - User confusion around exchange rates or reporting year boundaries.
 
-## 9. Milestones & sequencing
+## 9. Tax and accounting considerations
 
-### 9.1 Project estimate
+### 9.1 Cost basis calculation
 
-- Small: 3-5 weeks3
+- **Transaction costs inclusion**: Clarify whether brokerage commissions, fees, and custody charges should be added to cost basis and subtracted from sale proceeds per Polish tax law.
+- **Acquisition cost adjustments**: Define how to handle any adjustments to purchase price (e.g., settlement fees, transfer taxes).
+- **Rounding rules**: Implement Polish Tax Authority rounding rules (typically to 2 decimal places for PLN, but verify official guidance).
 
-### 9.2 Team size & composition
+### 9.2 Currency conversion rules
+
+- **Conversion date**: Specify whether to use trade date or settlement date for FX conversion (Polish regulations typically require trade date).
+- **Official rates source**: Use National Bank of Poland (NBP) official exchange rates as the authoritative source for tax purposes.
+- **Rate unavailability**: Define fallback logic when NBP rate is unavailable for a specific date (e.g., weekends, holidays) - stop processing and send failure email.
+- **Mid-rate vs buy/sell rates**: Clarify which rate to use (NBP publishes average rates suitable for tax purposes).
+
+### 9.3 Corporate actions handling
+
+- **Stock splits and reverse splits**: Adjust cost basis and share quantity accordingly, maintaining total cost basis.
+- **Dividends and distributions**: Exclude from capital gains calculation (reported separately on PIT-8C for dividend income).
+- **Mergers and acquisitions**: Define how to handle stock conversions and cash-in-lieu payments.
+- **Spin-offs and rights issues**: Allocate cost basis between original and new securities per tax rules.
+- **Bonus shares**: Adjust cost basis per share when free shares are received.
+- **Return of capital**: Reduce cost basis rather than treating as taxable income.
+
+### 9.4 Transaction timing and settlement
+
+- **Reporting year boundaries**: Use trade date (not settlement date) to determine which tax year a transaction belongs to.
+- **Unsettled trades**: Clarify treatment of trades executed near year-end that settle in following year.
+- **Cross-year positions**: Ensure buys from previous years can be matched to sells in reporting year.
+
+### 9.5 Asset type considerations
+
+- **Equity vs other instruments**: Confirm scope is limited to publicly traded stocks for MVP.
+- **ETFs and funds**: Clarify if treated same as individual stocks or require different handling.
+- **Fractional shares**: Define rounding and matching rules for partial share quantities.
+- **Derivatives exclusion**: Explicitly exclude options, futures, and other derivatives from MVP scope.
+
+### 9.6 Loss handling and limitations
+
+- **Loss offset rules**: Implement rules for offsetting gains with losses within the same tax year.
+- **Loss carryforward**: Document whether unused losses can be carried to future years (not implemented in MVP but should be noted).
+- **Wash sale considerations**: Research if Poland has wash sale rules (buying back same security within specific period).
+
+### 9.7 Documentation and audit trail
+
+- **Calculation transparency**: Provide detailed breakdown showing each matched buy-sell pair with dates, quantities, prices, FX rates, and resulting gain/loss.
+- **Source data retention**: Maintain original CSV and all intermediate calculation steps for audit purposes.
+- **Assumption documentation**: Clearly state all assumptions, limitations, and edge cases in the summary report.
+- **Disclaimer**: Include statement that the calculation is for informational purposes and users should verify with tax professional.
+
+### 9.8 Compliance and accuracy validation
+
+- **Reference calculations**: Test against known scenarios and manual calculations to verify accuracy.
+- **Edge case testing**: Validate handling of same-day buys and sells, zero-cost basis, very small quantities.
+- **Regulatory updates**: Plan for annual review of tax rules and calculation methodology.
+- **Professional review**: Consider having tax accountant review calculation logic before production release.
+
+### 9.9 Reporting requirements for PIT-38
+
+- **Form sections mapping**: Identify which PIT-38 sections/lines should be populated with calculated values.
+- **Supporting documentation**: List what additional documents users should attach to PIT-38 (transaction confirmations, broker statements).
+- **Income classification**: Confirm capital gains are reported in correct income category per Polish tax code.
+- **Tax rate application**: Verify current capital gains tax rate (19% for Poland as of recent years, but confirm for reporting year).
+
+### 9.10 Special scenarios and exclusions
+
+- **Tax-exempt accounts**: Clarify that calculator assumes taxable accounts (not IKE/IKZE retirement accounts).
+- **Non-resident considerations**: Note that calculator is for Polish tax residents only.
+- **First sale of inherited shares**: Exclude from scope if special rules apply.
+- **Employee stock options/RSUs**: Exclude from MVP as they have different cost basis rules.
+
+## 10. Milestones & sequencing
+
+### 10.1 Project estimate
+
+- Small: 3-5 weeks
+
+### 10.2 Team size & composition
 
 - 3 people: backend engineer, frontend engineer, QA/analyst
 
-### 9.3 Suggested phases
+### 10.3 Suggested phases
 
 - **Phase 1**: File intake, validation, and calculation engine (2-3 weeks)
   - Key deliverables: FIFO matching, PIT-38 totals in PLN, validation errors.
 - **Phase 2**: Summary report and email delivery (1-2 weeks)
   - Key deliverables: Human-readable summary, email sending, retention policy.
 
-## 10. Final checklist
+## 11. Final checklist
 
 - All user stories are testable with objective acceptance criteria.
 - Acceptance criteria are specific and measurable.
