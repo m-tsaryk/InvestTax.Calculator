@@ -52,3 +52,28 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+## AWS
+cdk.out/
+.aws-sam/
+
+## IDEs
+.vs/
+.vscode/
+.idea/
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+
+## Test Results
+TestResults/
+coverage/
+
+## LocalStack
+localstack-data/
