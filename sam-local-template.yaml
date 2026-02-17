@@ -1,0 +1,124 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Local development template for InvestTax Calculator
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 512
+    Runtime: dotnet10
+    Environment:
+      Variables:
+        ASPNETCORE_ENVIRONMENT: Development
+        AWS_REGION: eu-central-1
+        UPLOAD_BUCKET: investtax-upload-local
+        PROCESSING_BUCKET: investtax-processing-local
+        JOBS_TABLE: InvestTax-Jobs-Local
+
+Resources:
+  ValidatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: InvestTax.Lambda.Validator::InvestTax.Lambda.Validator.Function::FunctionHandler
+      CodeUri: ./src/InvestTax.Lambda.Validator/
+      Description: Validates uploaded CSV files
+      Policies:
+        - S3ReadPolicy:
+            BucketName: investtax-upload-local
+        - S3CrudPolicy:
+            BucketName: investtax-processing-local
+        - DynamoDBCrudPolicy:
+            TableName: InvestTax-Jobs-Local
+
+  NormalizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: InvestTax.Lambda.Normalizer::InvestTax.Lambda.Normalizer.Function::FunctionHandler
+      CodeUri: ./src/InvestTax.Lambda.Normalizer/
+      Description: Normalizes transaction data
+      Policies:
+        - S3ReadPolicy:
+            BucketName: investtax-processing-local
+        - S3CrudPolicy:
+            BucketName: investtax-processing-local
+        - DynamoDBCrudPolicy:
+            TableName: InvestTax-Jobs-Local
+
+  NBPClientFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: InvestTax.Lambda.NBPClient::InvestTax.Lambda.NBPClient.Function::FunctionHandler
+      CodeUri: ./src/InvestTax.Lambda.NBPClient/
+      Description: Fetches NBP exchange rates
+      Policies:
+        - S3ReadPolicy:
+            BucketName: investtax-processing-local
+        - S3CrudPolicy:
+            BucketName: investtax-processing-local
+        - DynamoDBCrudPolicy:
+            TableName: InvestTax-Jobs-Local
+
+  CalculatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: InvestTax.Lambda.Calculator::InvestTax.Lambda.Calculator.Function::FunctionHandler
+      CodeUri: ./src/InvestTax.Lambda.Calculator/
+      Description: Calculates taxes using FIFO methodology
+      Policies:
+        - S3ReadPolicy:
+            BucketName: investtax-processing-local
+        - S3CrudPolicy:
+            BucketName: investtax-processing-local
+        - DynamoDBCrudPolicy:
+            TableName: InvestTax-Jobs-Local
+
+  ReportGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: InvestTax.Lambda.ReportGenerator::InvestTax.Lambda.ReportGenerator.Function::FunctionHandler
+      CodeUri: ./src/InvestTax.Lambda.ReportGenerator/
+      Description: Generates tax reports
+      Policies:
+        - S3ReadPolicy:
+            BucketName: investtax-processing-local
+        - S3CrudPolicy:
+            BucketName: investtax-processing-local
+        - DynamoDBCrudPolicy:
+            TableName: InvestTax-Jobs-Local
+
+  EmailSenderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: InvestTax.Lambda.EmailSender::InvestTax.Lambda.EmailSender.Function::FunctionHandler
+      CodeUri: ./src/InvestTax.Lambda.EmailSender/
+      Description: Sends email notifications
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: InvestTax-Jobs-Local
+        - SESCrudPolicy:
+            IdentityName: "*"
+
+Outputs:
+  ValidatorFunctionArn:
+    Description: Validator Lambda Function ARN
+    Value: !GetAtt ValidatorFunction.Arn
+  
+  NormalizerFunctionArn:
+    Description: Normalizer Lambda Function ARN
+    Value: !GetAtt NormalizerFunction.Arn
+  
+  NBPClientFunctionArn:
+    Description: NBP Client Lambda Function ARN
+    Value: !GetAtt NBPClientFunction.Arn
+  
+  CalculatorFunctionArn:
+    Description: Calculator Lambda Function ARN
+    Value: !GetAtt CalculatorFunction.Arn
+  
+  ReportGeneratorFunctionArn:
+    Description: Report Generator Lambda Function ARN
+    Value: !GetAtt ReportGeneratorFunction.Arn
+  
+  EmailSenderFunctionArn:
+    Description: Email Sender Lambda Function ARN
+    Value: !GetAtt EmailSenderFunction.Arn
