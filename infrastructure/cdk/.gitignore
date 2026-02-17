@@ -1,0 +1,18 @@
+*.js
+*.d.ts
+node_modules
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out
+
+# Test results
+coverage/
+.nyc_output/
+
+# Logs
+*.log
+
+# Editor directories
+.vscode/
+.idea/
