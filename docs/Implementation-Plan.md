@@ -2299,33 +2299,3898 @@ All services integrate with AWS SDK and include:
 
 ---
 
-**Note**: Due to length constraints, this implementation plan continues with Steps 6-20 covering:
-- Step 6-11: Individual Lambda function implementations
-- Step 12-14: Step Functions orchestration and integration
-- Step 15-17: Unit testing
-- Step 18-20: GitHub Actions CI/CD
+### Step 6: CSV Validator Lambda Implementation
 
-Each step follows the same detailed format with:
-- Duration estimate
-- Dependencies
-- Technology stack
-- Detailed actions with code
-- Expected output
-- Success criteria
-- Troubleshooting tips
+**Duration**: 3-4 hours  
+**Dependencies**: Step 5  
+**Prerequisites**: Shared infrastructure services implemented
 
-The remaining steps maintain consistency with the MVP scope:
-- No caching (Phase 2)
-- No parallel processing (Phase 2)
-- Plain text reports only (Phase 2 adds HTML)
-- Sequential Lambda invocations
-- Basic error handling
+#### Objective
+Implement Lambda function to validate CSV file structure, headers, data types, and business rules before processing.
+
+#### Technology Stack
+- **.NET Runtime**: 10.0
+- **CSV Parsing**: CsvHelper 33.x
+- **AWS SDK**: AWSSDK.S3, AWSSDK.Lambda
+- **Validation**: FluentValidation 11.9.x
+- **Logging**: AWS.Lambda.Logging.AspNetCore 4.x
+
+#### Actions
+
+1. **Add NuGet Packages to Validator Project**
+   ```bash
+   cd src/InvestTax.Lambda.Validator
+   dotnet add package Amazon.Lambda.Core --version 2.2.0
+   dotnet add package Amazon.Lambda.Serialization.SystemTextJson --version 2.4.1
+   dotnet add package AWSSDK.S3 --version 3.7.307
+   dotnet add package CsvHelper --version 33.0.1
+   dotnet add package FluentValidation --version 11.9.0
+   dotnet add package AWS.Lambda.Logging.AspNetCore --version 4.1.0
+   ```
+
+2. **Create Validation Models**
+
+   Create `Models/CsvRow.cs`:
+   ```csharp
+   namespace InvestTax.Lambda.Validator.Models;
+   
+   public class CsvRow
+   {
+       public string Action { get; set; }
+       public string Time { get; set; }
+       public string ISIN { get; set; }
+       public string Ticker { get; set; }
+       public string Name { get; set; }
+       public string NoOfShares { get; set; }
+       public string PricePerShare { get; set; }
+       public string CurrencySymbol { get; set; }
+       public string ExchangeRate { get; set; }
+       public string Result { get; set; }
+       public string Total { get; set; }
+       public string Notes { get; set; }
+   }
+   ```
+
+   Create `Models/ValidationResult.cs`:
+   ```csharp
+   namespace InvestTax.Lambda.Validator.Models;
+   
+   public class ValidationResult
+   {
+       public bool Valid { get; set; }
+       public int RowCount { get; set; }
+       public int Year { get; set; }
+       public List<string> Currencies { get; set; } = new();
+       public string ValidatedFileKey { get; set; }
+       public List<ValidationError> Errors { get; set; } = new();
+   }
+   
+   public class ValidationError
+   {
+       public int Row { get; set; }
+       public string Column { get; set; }
+       public string Message { get; set; }
+   }
+   ```
+
+3. **Create CSV Row Validator**
+
+   Create `Validators/CsvRowValidator.cs`:
+   ```csharp
+   using FluentValidation;
+   using InvestTax.Lambda.Validator.Models;
+   
+   namespace InvestTax.Lambda.Validator.Validators;
+   
+   public class CsvRowValidator : AbstractValidator<CsvRow>
+   {
+       private static readonly string[] ValidActions = { "Market buy", "Market sell" };
+       
+       public CsvRowValidator()
+       {
+           RuleFor(x => x.Action)
+               .NotEmpty()
+               .Must(a => ValidActions.Contains(a))
+               .WithMessage("Action must be 'Market buy' or 'Market sell'");
+           
+           RuleFor(x => x.Time)
+               .NotEmpty()
+               .Must(BeValidDateTime)
+               .WithMessage("Time must be valid ISO 8601 datetime");
+           
+           RuleFor(x => x.ISIN)
+               .NotEmpty()
+               .Length(12)
+               .Matches("^[A-Z0-9]{12}$")
+               .WithMessage("ISIN must be 12 alphanumeric characters");
+           
+           RuleFor(x => x.NoOfShares)
+               .NotEmpty()
+               .Must(BePositiveDecimal)
+               .WithMessage("No. of shares must be positive number");
+           
+           RuleFor(x => x.PricePerShare)
+               .NotEmpty()
+               .Must(BePositiveDecimal)
+               .WithMessage("Price per share must be positive number");
+           
+           RuleFor(x => x.CurrencySymbol)
+               .NotEmpty()
+               .Length(3)
+               .Matches("^[A-Z]{3}$")
+               .WithMessage("Currency must be 3-letter ISO code");
+       }
+       
+       private bool BeValidDateTime(string dateTime)
+       {
+           return DateTime.TryParse(dateTime, out _);
+       }
+       
+       private bool BePositiveDecimal(string value)
+       {
+           return decimal.TryParse(value, out var result) && result > 0;
+       }
+   }
+   ```
+
+4. **Create Validation Service**
+
+   Create `Services/CsvValidationService.cs`:
+   ```csharp
+   using CsvHelper;
+   using CsvHelper.Configuration;
+   using InvestTax.Lambda.Validator.Models;
+   using InvestTax.Lambda.Validator.Validators;
+   using System.Globalization;
+   
+   namespace InvestTax.Lambda.Validator.Services;
+   
+   public class CsvValidationService
+   {
+       private readonly CsvRowValidator _validator;
+       private readonly ILogger<CsvValidationService> _logger;
+       
+       public CsvValidationService(ILogger<CsvValidationService> logger)
+       {
+           _validator = new CsvRowValidator();
+           _logger = logger;
+       }
+       
+       public async Task<ValidationResult> ValidateFileAsync(
+           string filePath, 
+           CancellationToken cancellationToken)
+       {
+           var result = new ValidationResult();
+           var currencies = new HashSet<string>();
+           int? year = null;
+           
+           try
+           {
+               var config = new CsvConfiguration(CultureInfo.InvariantCulture)
+               {
+                   Delimiter = "|",
+                   HasHeaderRecord = true,
+                   TrimOptions = TrimOptions.Trim
+               };
+               
+               using var reader = new StreamReader(filePath);
+               using var csv = new CsvReader(reader, config);
+               
+               var records = csv.GetRecords<CsvRow>().ToList();
+               
+               if (records.Count == 0)
+               {
+                   result.Errors.Add(new ValidationError
+                   {
+                       Row = 0,
+                       Column = "File",
+                       Message = "File contains no data rows"
+                   });
+                   return result;
+               }
+               
+               if (records.Count > 100000)
+               {
+                   result.Errors.Add(new ValidationError
+                   {
+                       Row = 0,
+                       Column = "File",
+                       Message = "File exceeds maximum 100,000 rows"
+                   });
+                   return result;
+               }
+               
+               for (int i = 0; i < records.Count; i++)
+               {
+                   var record = records[i];
+                   var rowNumber = i + 2; // Account for header row
+                   
+                   var validationResult = _validator.Validate(record);
+                   
+                   if (!validationResult.IsValid)
+                   {
+                       foreach (var error in validationResult.Errors)
+                       {
+                           result.Errors.Add(new ValidationError
+                           {
+                               Row = rowNumber,
+                               Column = error.PropertyName,
+                               Message = error.ErrorMessage
+                           });
+                       }
+                   }
+                   
+                   // Extract year from first valid date
+                   if (year == null && DateTime.TryParse(record.Time, out var dt))
+                   {
+                       year = dt.Year;
+                   }
+                   
+                   // Collect unique currencies
+                   if (!string.IsNullOrEmpty(record.CurrencySymbol))
+                   {
+                       currencies.Add(record.CurrencySymbol.ToUpper());
+                   }
+               }
+               
+               result.Valid = result.Errors.Count == 0;
+               result.RowCount = records.Count;
+               result.Year = year ?? DateTime.Now.Year;
+               result.Currencies = currencies.ToList();
+               
+               _logger.LogInformation(
+                   "Validation complete: {Valid}, Rows: {RowCount}, Errors: {ErrorCount}",
+                   result.Valid, result.RowCount, result.Errors.Count);
+               
+               return result;
+           }
+           catch (Exception ex)
+           {
+               _logger.LogError(ex, "Error validating CSV file");
+               result.Errors.Add(new ValidationError
+               {
+                   Row = 0,
+                   Column = "File",
+                   Message = $"File parsing error: {ex.Message}"
+               });
+               return result;
+           }
+       }
+   }
+   ```
+
+5. **Implement Lambda Function Handler**
+
+   Update `Function.cs`:
+   ```csharp
+   using Amazon.Lambda.Core;
+   using Amazon.S3;
+   using InvestTax.Core.Models;
+   using InvestTax.Infrastructure.AWS;
+   using InvestTax.Lambda.Validator.Services;
+   using Microsoft.Extensions.DependencyInjection;
+   using Microsoft.Extensions.Logging;
+   using System.Text.Json;
+   
+   [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
+   
+   namespace InvestTax.Lambda.Validator;
+   
+   public class Function
+   {
+       private readonly IS3Service _s3Service;
+       private readonly CsvValidationService _validationService;
+       private readonly ILogger<Function> _logger;
+       
+       public Function()
+       {
+           var services = new ServiceCollection();
+           ConfigureServices(services);
+           var serviceProvider = services.BuildServiceProvider();
+           
+           _s3Service = serviceProvider.GetRequiredService<IS3Service>();
+           _validationService = serviceProvider.GetRequiredService<CsvValidationService>();
+           _logger = serviceProvider.GetRequiredService<ILogger<Function>>();
+       }
+       
+       private void ConfigureServices(IServiceCollection services)
+       {
+           services.AddLogging(builder =>
+           {
+               builder.AddConsole();
+               builder.AddLambdaLogger();
+           });
+           
+           services.AddAWSService<IAmazonS3>();
+           services.AddSingleton<IS3Service, S3Service>();
+           services.AddSingleton<CsvValidationService>();
+       }
+       
+       public async Task<LambdaInput> FunctionHandler(
+           LambdaInput input, 
+           ILambdaContext context)
+       {
+           _logger.LogInformation(
+               "Starting validation for JobId: {JobId}, File: {FileKey}",
+               input.JobId, input.FileKey);
+           
+           try
+           {
+               var uploadBucket = Environment.GetEnvironmentVariable("UPLOAD_BUCKET");
+               var processingBucket = Environment.GetEnvironmentVariable("PROCESSING_BUCKET");
+               
+               // Download file from S3
+               var localPath = Path.Combine(Path.GetTempPath(), $"{input.JobId}.csv");
+               await _s3Service.DownloadFileAsync(
+                   uploadBucket, 
+                   input.FileKey, 
+                   localPath, 
+                   context.CancellationToken);
+               
+               // Validate file
+               var validationResult = await _validationService.ValidateFileAsync(
+                   localPath, 
+                   context.CancellationToken);
+               
+               if (validationResult.Valid)
+               {
+                   // Upload validated file to processing bucket
+                   var validatedKey = $"validated/{input.JobId}.csv";
+                   await _s3Service.UploadFileAsync(
+                       processingBucket, 
+                       validatedKey, 
+                       localPath, 
+                       context.CancellationToken);
+                   
+                   input.ValidatedFileKey = validatedKey;
+                   input.RowCount = validationResult.RowCount;
+                   input.Year = validationResult.Year;
+                   input.Currencies = validationResult.Currencies;
+                   input.Stage = "VALIDATED";
+                   
+                   _logger.LogInformation(
+                       "Validation successful: {RowCount} rows, Year: {Year}",
+                       validationResult.RowCount, validationResult.Year);
+               }
+               else
+               {
+                   input.Stage = "VALIDATION_FAILED";
+                   input.ErrorMessage = JsonSerializer.Serialize(validationResult.Errors);
+                   
+                   _logger.LogWarning(
+                       "Validation failed with {ErrorCount} errors",
+                       validationResult.Errors.Count);
+               }
+               
+               // Cleanup local file
+               if (File.Exists(localPath))
+               {
+                   File.Delete(localPath);
+               }
+               
+               return input;
+           }
+           catch (Exception ex)
+           {
+               _logger.LogError(ex, "Error in validator function");
+               input.Stage = "VALIDATION_ERROR";
+               input.ErrorMessage = ex.Message;
+               throw;
+           }
+       }
+   }
+   ```
+
+6. **Create Lambda Configuration**
+
+   Update `aws-lambda-tools-defaults.json`:
+   ```json
+   {
+     "Information": [
+       "This file provides default values for the deployment wizard inside Visual Studio and the AWS Lambda commands added to the .NET Core CLI."
+     ],
+     "profile": "",
+     "region": "eu-central-1",
+     "configuration": "Release",
+     "function-runtime": "dotnet10",
+     "function-memory-size": 512,
+     "function-timeout": 300,
+     "function-handler": "InvestTax.Lambda.Validator::InvestTax.Lambda.Validator.Function::FunctionHandler",
+     "environment-variables": {
+       "UPLOAD_BUCKET": "investtax-upload-dev",
+       "PROCESSING_BUCKET": "investtax-processing-dev"
+     }
+   }
+   ```
+
+7. **Build and Test Locally**
+   ```bash
+   cd src/InvestTax.Lambda.Validator
+   dotnet build
+   dotnet lambda test-tool
+   ```
+
+#### Expected Output
+```
+Lambda Function Structure:
+InvestTax.Lambda.Validator/
+├── Function.cs
+├── Models/
+│   ├── CsvRow.cs
+│   └── ValidationResult.cs
+├── Validators/
+│   └── CsvRowValidator.cs
+├── Services/
+│   └── CsvValidationService.cs
+└── aws-lambda-tools-defaults.json
+
+Validation Result (Success):
+{
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "stage": "VALIDATED",
+  "validatedFileKey": "validated/550e8400-e29b-41d4-a716-446655440000.csv",
+  "rowCount": 234,
+  "year": 2024,
+  "currencies": ["USD", "EUR"]
+}
+
+Validation Result (Failure):
+{
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "stage": "VALIDATION_FAILED",
+  "errorMessage": "[{\"row\":15,\"column\":\"Time\",\"message\":\"Invalid date\"}]"
+}
+```
+
+#### Success Criteria
+- [ ] Lambda function builds without errors
+- [ ] CsvHelper successfully parses pipe-delimited files
+- [ ] FluentValidation rules validate all required fields
+- [ ] Valid files uploaded to processing bucket
+- [ ] Validation errors returned in structured format
+- [ ] Local testing with dotnet lambda test-tool works
+
+#### Troubleshooting
+- **CsvHelper parsing errors**: Check delimiter configuration (pipe vs comma)
+- **Memory errors**: Increase function memory if processing large files
+- **S3 access denied**: Verify Lambda execution role has S3 permissions
+- **Missing headers**: Check CsvHelper header mapping configuration
+
+---
+
+### Step 7: Data Normalizer Lambda Implementation
+
+**Duration**: 3-4 hours  
+**Dependencies**: Step 6  
+**Prerequisites**: Validator Lambda functional
+
+#### Objective
+Implement Lambda function to normalize dates, currencies, numbers, and group transactions by ISIN for downstream processing.
+
+#### Technology Stack
+- **.NET Runtime**: 10.0
+- **CSV Parsing**: CsvHelper 33.x
+- **JSON Serialization**: System.Text.Json
+- **Date/Time**: NodaTime 3.1.x (timezone handling)
+
+#### Actions
+
+1. **Add NuGet Packages**
+   ```bash
+   cd src/InvestTax.Lambda.Normalizer
+   dotnet add package NodaTime --version 3.1.9
+   dotnet add package CsvHelper --version 33.0.1
+   ```
+
+2. **Create Normalized Transaction Models**
+
+   Create `Models/NormalizedTransaction.cs`:
+   ```csharp
+   namespace InvestTax.Lambda.Normalizer.Models;
+   
+   public class NormalizedTransaction
+   {
+       public int Id { get; set; }
+       public TransactionAction Action { get; set; }
+       public DateTime TransactionDate { get; set; }
+       public string ISIN { get; set; }
+       public string Ticker { get; set; }
+       public string Name { get; set; }
+       public decimal Shares { get; set; }
+       public decimal PricePerShare { get; set; }
+       public string Currency { get; set; }
+       public decimal ExchangeRate { get; set; }
+       public decimal Total { get; set; }
+       public string Notes { get; set; }
+   }
+   
+   public class TransactionGroup
+   {
+       public string ISIN { get; set; }
+       public string Ticker { get; set; }
+       public List<NormalizedTransaction> Transactions { get; set; } = new();
+   }
+   
+   public class NormalizationResult
+   {
+       public string NormalizedFileKey { get; set; }
+       public Dictionary<string, TransactionGroup> TransactionGroups { get; set; } = new();
+       public int TotalTransactions { get; set; }
+   }
+   ```
+
+3. **Create Normalization Service**
+
+   Create `Services/NormalizationService.cs`:
+   ```csharp
+   using CsvHelper;
+   using CsvHelper.Configuration;
+   using InvestTax.Lambda.Normalizer.Models;
+   using NodaTime;
+   using System.Globalization;
+   using System.Text.Json;
+   
+   namespace InvestTax.Lambda.Normalizer.Services;
+   
+   public class NormalizationService
+   {
+       private readonly ILogger<NormalizationService> _logger;
+       private readonly DateTimeZone _warsawTimeZone;
+       
+       public NormalizationService(ILogger<NormalizationService> logger)
+       {
+           _logger = logger;
+           _warsawTimeZone = DateTimeZoneProviders.Tzdb["Europe/Warsaw"];
+       }
+       
+       public async Task<NormalizationResult> NormalizeAsync(
+           string inputPath,
+           string outputPath,
+           CancellationToken cancellationToken)
+       {
+           var result = new NormalizationResult();
+           var transactions = new List<NormalizedTransaction>();
+           
+           try
+           {
+               // Read and parse CSV
+               var config = new CsvConfiguration(CultureInfo.InvariantCulture)
+               {
+                   Delimiter = "|",
+                   HasHeaderRecord = true,
+                   TrimOptions = TrimOptions.Trim
+               };
+               
+               using (var reader = new StreamReader(inputPath))
+               using (var csv = new CsvReader(reader, config))
+               {
+                   var records = csv.GetRecords<dynamic>().ToList();
+                   int id = 1;
+                   
+                   foreach (var record in records)
+                   {
+                       var normalized = NormalizeRow(record, id++);
+                       transactions.Add(normalized);
+                   }
+               }
+               
+               // Sort by date (earliest first)
+               transactions = transactions.OrderBy(t => t.TransactionDate).ToList();
+               
+               // Group by ISIN
+               var grouped = transactions.GroupBy(t => t.ISIN);
+               
+               foreach (var group in grouped)
+               {
+                   result.TransactionGroups[group.Key] = new TransactionGroup
+                   {
+                       ISIN = group.Key,
+                       Ticker = group.First().Ticker,
+                       Transactions = group.OrderBy(t => t.TransactionDate).ToList()
+                   };
+               }
+               
+               result.TotalTransactions = transactions.Count;
+               
+               // Write JSON output
+               var json = JsonSerializer.Serialize(result.TransactionGroups, new JsonSerializerOptions
+               {
+                   WriteIndented = true
+               });
+               
+               await File.WriteAllTextAsync(outputPath, json, cancellationToken);
+               
+               _logger.LogInformation(
+                   "Normalized {Count} transactions into {Groups} ISIN groups",
+                   result.TotalTransactions, result.TransactionGroups.Count);
+               
+               return result;
+           }
+           catch (Exception ex)
+           {
+               _logger.LogError(ex, "Error normalizing data");
+               throw;
+           }
+       }
+       
+       private NormalizedTransaction NormalizeRow(dynamic record, int id)
+       {
+           var transaction = new NormalizedTransaction
+           {
+               Id = id,
+               Action = ParseAction(record.Action),
+               TransactionDate = ParseDate(record.Time),
+               ISIN = ((string)record.ISIN).Trim().ToUpper(),
+               Ticker = ((string)record.Ticker).Trim().ToUpper(),
+               Name = ((string)record.Name).Trim(),
+               Shares = ParseDecimal(record.NoOfShares),
+               PricePerShare = ParseDecimal(record.PricePerShare),
+               Currency = ((string)record.CurrencySymbol).Trim().ToUpper(),
+               ExchangeRate = ParseDecimal(record.ExchangeRate),
+               Total = ParseDecimal(record.Total),
+               Notes = record.Notes?.ToString()?.Trim() ?? string.Empty
+           };
+           
+           return transaction;
+       }
+       
+       private TransactionAction ParseAction(string action)
+       {
+           return action.ToLower() switch
+           {
+               "market buy" => TransactionAction.Buy,
+               "market sell" => TransactionAction.Sell,
+               _ => throw new InvalidOperationException($"Unknown action: {action}")
+           };
+       }
+       
+       private DateTime ParseDate(string dateStr)
+       {
+           var parsedDate = DateTime.Parse(dateStr);
+           
+           // Convert to Warsaw timezone
+           var instant = Instant.FromDateTimeUtc(DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc));
+           var zonedDateTime = instant.InZone(_warsawTimeZone);
+           
+           return zonedDateTime.ToDateTimeUnspecified();
+       }
+       
+       private decimal ParseDecimal(string value)
+       {
+           // Remove any thousand separators and normalize
+           value = value.Replace(",", "").Replace(" ", "").Trim();
+           return decimal.Parse(value, CultureInfo.InvariantCulture);
+       }
+   }
+   ```
+
+4. **Implement Lambda Handler**
+
+   Update `Function.cs`:
+   ```csharp
+   using Amazon.Lambda.Core;
+   using Amazon.S3;
+   using InvestTax.Core.Models;
+   using InvestTax.Infrastructure.AWS;
+   using InvestTax.Lambda.Normalizer.Services;
+   using Microsoft.Extensions.DependencyInjection;
+   using Microsoft.Extensions.Logging;
+   
+   [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
+   
+   namespace InvestTax.Lambda.Normalizer;
+   
+   public class Function
+   {
+       private readonly IS3Service _s3Service;
+       private readonly NormalizationService _normalizationService;
+       private readonly ILogger<Function> _logger;
+       
+       public Function()
+       {
+           var services = new ServiceCollection();
+           ConfigureServices(services);
+           var serviceProvider = services.BuildServiceProvider();
+           
+           _s3Service = serviceProvider.GetRequiredService<IS3Service>();
+           _normalizationService = serviceProvider.GetRequiredService<NormalizationService>();
+           _logger = serviceProvider.GetRequiredService<ILogger<Function>>();
+       }
+       
+       private void ConfigureServices(IServiceCollection services)
+       {
+           services.AddLogging(builder =>
+           {
+               builder.AddConsole();
+               builder.AddLambdaLogger();
+           });
+           
+           services.AddAWSService<IAmazonS3>();
+           services.AddSingleton<IS3Service, S3Service>();
+           services.AddSingleton<NormalizationService>();
+       }
+       
+       public async Task<LambdaInput> FunctionHandler(
+           LambdaInput input,
+           ILambdaContext context)
+       {
+           _logger.LogInformation(
+               "Starting normalization for JobId: {JobId}",
+               input.JobId);
+           
+           try
+           {
+               var processingBucket = Environment.GetEnvironmentVariable("PROCESSING_BUCKET");
+               
+               // Download validated file
+               var inputPath = Path.Combine(Path.GetTempPath(), $"{input.JobId}_input.csv");
+               await _s3Service.DownloadFileAsync(
+                   processingBucket,
+                   input.ValidatedFileKey,
+                   inputPath,
+                   context.CancellationToken);
+               
+               // Normalize data
+               var outputPath = Path.Combine(Path.GetTempPath(), $"{input.JobId}_normalized.json");
+               var result = await _normalizationService.NormalizeAsync(
+                   inputPath,
+                   outputPath,
+                   context.CancellationToken);
+               
+               // Upload normalized file
+               var normalizedKey = $"normalized/{input.JobId}.json";
+               await _s3Service.UploadFileAsync(
+                   processingBucket,
+                   normalizedKey,
+                   outputPath,
+                   context.CancellationToken);
+               
+               input.NormalizedFileKey = normalizedKey;
+               input.Stage = "NORMALIZED";
+               
+               _logger.LogInformation(
+                   "Normalization complete: {TotalTransactions} transactions",
+                   result.TotalTransactions);
+               
+               // Cleanup
+               File.Delete(inputPath);
+               File.Delete(outputPath);
+               
+               return input;
+           }
+           catch (Exception ex)
+           {
+               _logger.LogError(ex, "Error in normalizer function");
+               input.Stage = "NORMALIZATION_ERROR";
+               input.ErrorMessage = ex.Message;
+               throw;
+           }
+       }
+   }
+   ```
+
+5. **Configure Lambda Settings**
+
+   Update `aws-lambda-tools-defaults.json`:
+   ```json
+   {
+     "profile": "",
+     "region": "eu-central-1",
+     "configuration": "Release",
+     "function-runtime": "dotnet10",
+     "function-memory-size": 1024,
+     "function-timeout": 600,
+     "function-handler": "InvestTax.Lambda.Normalizer::InvestTax.Lambda.Normalizer.Function::FunctionHandler",
+     "environment-variables": {
+       "PROCESSING_BUCKET": "investtax-processing-dev"
+     }
+   }
+   ```
+
+6. **Build and Test**
+   ```bash
+   cd src/InvestTax.Lambda.Normalizer
+   dotnet build
+   ```
+
+#### Expected Output
+```
+Normalized JSON Structure:
+{
+  "US0378331005": {
+    "isin": "US0378331005",
+    "ticker": "AAPL",
+    "transactions": [
+      {
+        "id": 1,
+        "action": "Buy",
+        "transactionDate": "2024-03-15T10:30:00",
+        "isin": "US0378331005",
+        "ticker": "AAPL",
+        "shares": 10,
+        "pricePerShare": 170.50,
+        "currency": "USD",
+        "total": 1705.00
+      }
+    ]
+  }
+}
+```
+
+#### Success Criteria
+- [ ] CSV successfully parsed and converted to JSON
+- [ ] Dates normalized to Europe/Warsaw timezone
+- [ ] Numbers converted to decimal (no precision loss)
+- [ ] Currencies uppercased and validated
+- [ ] Transactions sorted by date
+- [ ] Transactions grouped by ISIN
+- [ ] JSON output uploaded to S3
+
+#### Troubleshooting
+- **Timezone conversion errors**: Verify NodaTime package installed
+- **Decimal parsing errors**: Check culture info (use InvariantCulture)
+- **Grouping issues**: Verify ISIN uppercase normalization
+- **Large file processing**: Increase Lambda memory and timeout
+
+---
+
+### Step 8: NBP Rate Fetcher Lambda Implementation
+
+**Duration**: 3-4 hours  
+**Dependencies**: Step 7  
+**Prerequisites**: Normalizer Lambda functional
+
+#### Objective
+Implement Lambda function to fetch PLN exchange rates from NBP API for all transaction dates and currencies (MVP: no caching, Phase 2 adds DynamoDB cache).
+
+#### Technology Stack
+- **.NET Runtime**: 10.0
+- **HTTP Client**: System.Net.Http
+- **Retry Policy**: Polly 8.3.x
+- **JSON**: System.Text.Json
+
+#### Actions
+
+1. **Add NuGet Packages**
+   ```bash
+   cd src/InvestTax.Lambda.NBPClient
+   dotnet add package Polly --version 8.3.0
+   dotnet add package Polly.Extensions.Http --version 3.0.0
+   ```
+
+2. **Create NBP Models**
+
+   Create `Models/NBPModels.cs`:
+   ```csharp
+   namespace InvestTax.Lambda.NBPClient.Models;
+   
+   public class NBPRateRequest
+   {
+       public string Currency { get; set; }
+       public DateTime Date { get; set; }
+   }
+   
+   public class NBPRateResponse
+   {
+       public string Currency { get; set; }
+       public DateTime Date { get; set; }
+       public decimal Rate { get; set; }
+       public string Source { get; set; } // "NBP_API" or "CACHE"
+   }
+   
+   public class NBPApiResponse
+   {
+       public string Table { get; set; }
+       public string Currency { get; set; }
+       public string Code { get; set; }
+       public List<NBPRate> Rates { get; set; }
+   }
+   
+   public class NBPRate
+   {
+       public string No { get; set; }
+       public DateTime EffectiveDate { get; set; }
+       public decimal Mid { get; set; }
+   }
+   
+   public class RateMap
+   {
+       public Dictionary<string, decimal> Rates { get; set; } = new();
+       // Key format: "{Currency}#{Date:yyyy-MM-dd}"
+   }
+   ```
+
+3. **Create NBP API Client Service**
+
+   Create `Services/NBPApiService.cs`:
+   ```csharp
+   using InvestTax.Lambda.NBPClient.Models;
+   using Polly;
+   using Polly.Extensions.Http;
+   using System.Text.Json;
+   
+   namespace InvestTax.Lambda.NBPClient.Services;
+   
+   public class NBPApiService
+   {
+       private readonly HttpClient _httpClient;
+       private readonly ILogger<NBPApiService> _logger;
+       private const string NBP_BASE_URL = "https://api.nbp.pl/api";
+       
+       public NBPApiService(ILogger<NBPApiService> logger)
+       {
+           _logger = logger;
+           
+           var retryPolicy = HttpPolicyExtensions
+               .HandleTransientHttpError()
+               .WaitAndRetryAsync(
+                   retryCount: 3,
+                   sleepDurationProvider: attempt => TimeSpan.FromSeconds(Math.Pow(2, attempt)),
+                   onRetry: (outcome, timespan, retryCount, context) =>
+                   {
+                       _logger.LogWarning(
+                           "NBP API call failed. Retry {RetryCount} after {Delay}ms",
+                           retryCount, timespan.TotalMilliseconds);
+                   });
+           
+           _httpClient = new HttpClient();
+           _httpClient.BaseAddress = new Uri(NBP_BASE_URL);
+           _httpClient.Timeout = TimeSpan.FromSeconds(30);
+       }
+       
+       public async Task<NBPRateResponse> GetExchangeRateAsync(
+           string currency,
+           DateTime date,
+           CancellationToken cancellationToken)
+       {
+           try
+           {
+               // NBP API format: /exchangerates/rates/a/{currency}/{date}
+               var dateStr = date.ToString("yyyy-MM-dd");
+               var url = $"/exchangerates/rates/a/{currency.ToLower()}/{dateStr}/?format=json";
+               
+               _logger.LogInformation("Fetching NBP rate: {Currency} for {Date}", currency, dateStr);
+               
+               var response = await _httpClient.GetAsync(url, cancellationToken);
+               
+               if (!response.IsSuccessStatusCode)
+               {
+                   if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                   {
+                       _logger.LogWarning(
+                           "NBP rate not found for {Currency} on {Date} (likely weekend/holiday)",
+                           currency, dateStr);
+                       
+                       // Try previous day (handle weekends/holidays)
+                       return await GetExchangeRateAsync(currency, date.AddDays(-1), cancellationToken);
+                   }
+                   
+                   throw new HttpRequestException(
+                       $"NBP API returned {response.StatusCode} for {currency} on {dateStr}");
+               }
+               
+               var content = await response.Content.ReadAsStringAsync(cancellationToken);
+               var nbpResponse = JsonSerializer.Deserialize<NBPApiResponse>(content);
+               
+               if (nbpResponse?.Rates == null || nbpResponse.Rates.Count == 0)
+               {
+                   throw new InvalidOperationException($"No rates returned for {currency} on {dateStr}");
+               }
+               
+               var rate = nbpResponse.Rates[0].Mid;
+               
+               _logger.LogInformation(
+                   "Fetched rate: 1 {Currency} = {Rate} PLN on {Date}",
+                   currency, rate, dateStr);
+               
+               return new NBPRateResponse
+               {
+                   Currency = currency.ToUpper(),
+                   Date = date,
+                   Rate = rate,
+                   Source = "NBP_API"
+               };
+           }
+           catch (Exception ex)
+           {
+               _logger.LogError(ex, "Error fetching NBP rate for {Currency} on {Date}", currency, date);
+               throw;
+           }
+       }
+       
+       public async Task<RateMap> GetRatesForTransactionsAsync(
+           Dictionary<string, TransactionGroup> transactionGroups,
+           CancellationToken cancellationToken)
+       {
+           var rateMap = new RateMap();
+           var uniqueRequests = new HashSet<(string Currency, DateTime Date)>();
+           
+           // Extract unique currency-date pairs
+           foreach (var group in transactionGroups.Values)
+           {
+               foreach (var transaction in group.Transactions)
+               {
+                   // Skip PLN transactions (rate = 1.0)
+                   if (transaction.Currency == "PLN")
+                       continue;
+                   
+                   uniqueRequests.Add((transaction.Currency, transaction.TransactionDate.Date));
+               }
+           }
+           
+           _logger.LogInformation(
+               "Fetching {Count} unique exchange rates from NBP API",
+               uniqueRequests.Count);
+           
+           // Fetch rates sequentially (MVP - Phase 2 will parallelize)
+           foreach (var (currency, date) in uniqueRequests)
+           {
+               try
+               {
+                   var rateResponse = await GetExchangeRateAsync(currency, date, cancellationToken);
+                   var key = $"{currency}#{date:yyyy-MM-dd}";
+                   rateMap.Rates[key] = rateResponse.Rate;
+               }
+               catch (Exception ex)
+               {
+                   _logger.LogError(
+                       ex,
+                       "Failed to fetch rate for {Currency} on {Date}",
+                       currency, date);
+                   throw new InvalidOperationException(
+                       $"Unable to fetch exchange rate for {currency} on {date:yyyy-MM-dd}. " +
+                       $"This rate is required for tax calculation.");
+               }
+           }
+           
+           _logger.LogInformation("Successfully fetched all {Count} rates", rateMap.Rates.Count);
+           
+           return rateMap;
+       }
+   }
+   ```
+
+4. **Implement Lambda Handler**
+
+   Update `Function.cs`:
+   ```csharp
+   using Amazon.Lambda.Core;
+   using Amazon.S3;
+   using InvestTax.Core.Models;
+   using InvestTax.Infrastructure.AWS;
+   using InvestTax.Lambda.NBPClient.Services;
+   using InvestTax.Lambda.NBPClient.Models;
+   using Microsoft.Extensions.DependencyInjection;
+   using Microsoft.Extensions.Logging;
+   using System.Text.Json;
+   
+   [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
+   
+   namespace InvestTax.Lambda.NBPClient;
+   
+   public class Function
+   {
+       private readonly IS3Service _s3Service;
+       private readonly NBPApiService _nbpApiService;
+       private readonly ILogger<Function> _logger;
+       
+       public Function()
+       {
+           var services = new ServiceCollection();
+           ConfigureServices(services);
+           var serviceProvider = services.BuildServiceProvider();
+           
+           _s3Service = serviceProvider.GetRequiredService<IS3Service>();
+           _nbpApiService = serviceProvider.GetRequiredService<NBPApiService>();
+           _logger = serviceProvider.GetRequiredService<ILogger<Function>>();
+       }
+       
+       private void ConfigureServices(IServiceCollection services)
+       {
+           services.AddLogging(builder =>
+           {
+               builder.AddConsole();
+               builder.AddLambdaLogger();
+           });
+           
+           services.AddAWSService<IAmazonS3>();
+           services.AddSingleton<IS3Service, S3Service>();
+           services.AddSingleton<NBPApiService>();
+       }
+       
+       public async Task<LambdaInput> FunctionHandler(
+           LambdaInput input,
+           ILambdaContext context)
+       {
+           _logger.LogInformation("Starting NBP rate fetch for JobId: {JobId}", input.JobId);
+           
+           try
+           {
+               var processingBucket = Environment.GetEnvironmentVariable("PROCESSING_BUCKET");
+               
+               // Download normalized transactions
+               var normalizedPath = Path.Combine(Path.GetTempPath(), $"{input.JobId}_normalized.json");
+               await _s3Service.DownloadFileAsync(
+                   processingBucket,
+                   input.NormalizedFileKey,
+                   normalizedPath,
+                   context.CancellationToken);
+               
+               // Parse transactions
+               var json = await File.ReadAllTextAsync(normalizedPath, context.CancellationToken);
+               var transactionGroups = JsonSerializer.Deserialize<Dictionary<string, TransactionGroup>>(json);
+               
+               // Fetch NBP rates
+               var rateMap = await _nbpApiService.GetRatesForTransactionsAsync(
+                   transactionGroups,
+                   context.CancellationToken);
+               
+               // Save rate map to S3
+               var rateMapPath = Path.Combine(Path.GetTempPath(), $"{input.JobId}_rates.json");
+               var rateMapJson = JsonSerializer.Serialize(rateMap, new JsonSerializerOptions
+               {
+                   WriteIndented = true
+               });
+               await File.WriteAllTextAsync(rateMapPath, rateMapJson, context.CancellationToken);
+               
+               var rateMapKey = $"rates/{input.JobId}.json";
+               await _s3Service.UploadFileAsync(
+                   processingBucket,
+                   rateMapKey,
+                   rateMapPath,
+                   context.CancellationToken);
+               
+               input.RateMapKey = rateMapKey;
+               input.Stage = "RATES_FETCHED";
+               
+               _logger.LogInformation(
+                   "Successfully fetched {Count} exchange rates",
+                   rateMap.Rates.Count);
+               
+               // Cleanup
+               File.Delete(normalizedPath);
+               File.Delete(rateMapPath);
+               
+               return input;
+           }
+           catch (Exception ex)
+           {
+               _logger.LogError(ex, "Error fetching NBP rates");
+               input.Stage = "RATE_FETCH_ERROR";
+               input.ErrorMessage = $"Failed to fetch exchange rates: {ex.Message}";
+               throw;
+           }
+       }
+   }
+   ```
+
+5. **Configure Lambda Settings**
+
+   Update `aws-lambda-tools-defaults.json`:
+   ```json
+   {
+     "profile": "",
+     "region": "eu-central-1",
+     "configuration": "Release",
+     "function-runtime": "dotnet10",
+     "function-memory-size": 512,
+     "function-timeout": 600,
+     "function-handler": "InvestTax.Lambda.NBPClient::InvestTax.Lambda.NBPClient.Function::FunctionHandler",
+     "environment-variables": {
+       "PROCESSING_BUCKET": "investtax-processing-dev",
+       "NBP_API_URL": "https://api.nbp.pl/api"
+     }
+   }
+   ```
+
+6. **Build and Test**
+   ```bash
+   cd src/InvestTax.Lambda.NBPClient
+   dotnet build
+   ```
+
+#### Expected Output
+```
+Rate Map JSON:
+{
+  "rates": {
+    "USD#2024-03-15": 3.9876,
+    "EUR#2024-03-15": 4.3210,
+    "USD#2024-06-20": 4.0123,
+    "EUR#2024-12-01": 4.3456
+  }
+}
+
+Lambda Output:
+{
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "stage": "RATES_FETCHED",
+  "rateMapKey": "rates/550e8400-e29b-41d4-a716-446655440000.json"
+}
+```
+
+#### Success Criteria
+- [ ] NBP API successfully called with proper endpoint format
+- [ ] Polly retry policy handles transient failures
+- [ ] Weekend/holiday dates handled (fallback to previous day)
+- [ ] Unique currency-date pairs extracted correctly
+- [ ] Rate map JSON generated and uploaded to S3
+- [ ] All required rates fetched (no missing rates)
+
+#### Troubleshooting
+- **404 from NBP API**: Check date format (yyyy-MM-dd) and currency code
+- **Rate not found**: Implement previous-day fallback for weekends/holidays
+- **Timeout errors**: Increase Lambda timeout or optimize sequential calls
+- **Polly not retrying**: Verify policy configuration and exception types
+
+---
+
+### Step 9: Tax Calculator Lambda Implementation
+
+**Duration**: 4-5 hours  
+**Dependencies**: Step 8  
+**Prerequisites**: NBP rate data available
+
+#### Objective
+Implement Lambda function with FIFO matching algorithm to calculate capital gains and tax liability inPLN.
+
+#### Technology Stack
+- **.NET Runtime**: 10.0
+- **Algorithm**: FIFO (First In, First Out)
+- **Decimal Math**: System.Decimal (no floating point)
+
+#### Actions
+
+1. **Create Calculation Models**
+
+   Create `Models/CalculationModels.cs`:
+   ```csharp
+   namespace InvestTax.Lambda.Calculator.Models;
+   
+   public class TaxCalculationResult
+   {
+       public string JobId { get; set; }
+       public int Year { get; set; }
+       public decimal TotalGainPLN { get; set; }
+       public decimal TotalTaxPLN { get; set; }
+       public int MatchedTransactionCount { get; set; }
+       public List<MatchedTransaction> MatchedTransactions { get; set; } = new();
+   }
+   
+   public class MatchedTransaction
+   {
+       public int MatchId { get; set; }
+       public string ISIN { get; set; }
+       public string Ticker { get; set; }
+       
+       // Buy details
+       public DateTime BuyDate { get; set; }
+       public decimal BuyShares { get; set; }
+       public decimal BuyPricePerShare { get; set; }
+       public string BuyCurrency { get; set; }
+       public decimal BuyExchangeRate { get; set; }
+       public decimal BuyCostPLN { get; set; }
+       
+       // Sell details
+       public DateTime SellDate { get; set; }
+       public decimal SellShares { get; set; }
+       public decimal SellPricePerShare { get; set; }
+       public string SellCurrency { get; set; }
+       public decimal SellExchangeRate { get; set; }
+       public decimal SellProceedsPLN { get; set; }
+       
+       // Calculation
+       public decimal GainLossPLN { get; set; }
+   }
+   
+   public class FIFOQueue
+   {
+       public string ISIN { get; set; }
+       public Queue<BuyPosition> BuyPositions { get; set; } = new();
+   }
+   
+   public class BuyPosition
+   {
+       public DateTime Date { get; set; }
+       public decimal RemainingShares { get; set; }
+       public decimal PricePerShare { get; set; }
+       public string Currency { get; set; }
+       public decimal ExchangeRate { get; set; }
+   }
+   ```
+
+2. **Create FIFO Calculator Service**
+
+   Create `Services/TaxCalculatorService.cs`:
+   ```csharp
+   using InvestTax.Lambda.Calculator.Models;
+   using InvestTax.Core.Enums;
+   
+   namespace InvestTax.Lambda.Calculator.Services;
+   
+   public class TaxCalculatorService
+   {
+       private readonly ILogger<TaxCalculatorService> _logger;
+       private const decimal TAX_RATE = 0.19m; // 19% Polish capital gains tax
+       private const int DECIMAL_PLACES = 2;
+       
+       public TaxCalculatorService(ILogger<TaxCalculatorService> logger)
+       {
+           _logger = logger;
+       }
+       
+       public TaxCalculationResult CalculateTax(
+           Dictionary<string, TransactionGroup> transactionGroups,
+           Dictionary<string, decimal> rateMap,
+           int year)
+       {
+           var result = new TaxCalculationResult
+           {
+               Year = year
+           };
+           
+           var matchId = 1;
+           
+           // Process each ISIN group separately
+           foreach (var group in transactionGroups.Values)
+           {
+               _logger.LogInformation(
+                   "Processing ISIN: {ISIN} with {Count} transactions",
+                   group.ISIN, group.Transactions.Count);
+               
+               var fifoQueue = new FIFOQueue { ISIN = group.ISIN };
+               
+               foreach (var transaction in group.Transactions.OrderBy(t => t.TransactionDate))
+               {
+                   if (transaction.Action == TransactionAction.Buy)
+                   {
+                       ProcessBuy(fifoQueue, transaction, rateMap);
+                   }
+                   else if (transaction.Action == TransactionAction.Sell)
+                   {
+                       var matches = ProcessSell(
+                           fifoQueue,
+                           transaction,
+                           rateMap,
+                           matchId);
+                       
+                       result.MatchedTransactions.AddRange(matches);
+                       matchId += matches.Count;
+                   }
+               }
+               
+               // Warn if there are remaining buy positions (not sold)
+               if (fifoQueue.BuyPositions.Count > 0)
+               {
+                   var totalRemaining = fifoQueue.BuyPositions.Sum(p => p.RemainingShares);
+                   _logger.LogInformation(
+                       "ISIN {ISIN} has {Shares} shares remaining (not sold)",
+                       group.ISIN, totalRemaining);
+               }
+           }
+           
+           // Calculate totals
+           result.TotalGainPLN = result.MatchedTransactions.Sum(m => m.GainLossPLN);
+           result.TotalTaxPLN = Math.Max(0, Math.Round(result.TotalGainPLN * TAX_RATE, DECIMAL_PLACES));
+           result.MatchedTransactionCount = result.MatchedTransactions.Count;
+           
+           _logger.LogInformation(
+               "Tax calculation complete: Gain={Gain} PLN, Tax={Tax} PLN, Matches={Count}",
+               result.TotalGainPLN, result.TotalTaxPLN, result.MatchedTransactionCount);
+           
+           return result;
+       }
+       
+       private void ProcessBuy(
+           FIFOQueue queue,
+           NormalizedTransaction transaction,
+           Dictionary<string, decimal> rateMap)
+       {
+           var exchangeRate = GetExchangeRate(
+               transaction.Currency,
+               transaction.TransactionDate,
+               rateMap);
+           
+           queue.BuyPositions.Enqueue(new BuyPosition
+           {
+               Date = transaction.TransactionDate,
+               RemainingShares = transaction.Shares,
+               PricePerShare = transaction.PricePerShare,
+               Currency = transaction.Currency,
+               ExchangeRate = exchangeRate
+           });
+           
+           _logger.LogDebug(
+               "Buy: {Shares} shares of {ISIN} at {Price} {Currency} (Rate: {Rate})",
+               transaction.Shares, queue.ISIN, transaction.PricePerShare,
+               transaction.Currency, exchangeRate);
+       }
+       
+       private List<MatchedTransaction> ProcessSell(
+           FIFOQueue queue,
+           NormalizedTransaction sellTransaction,
+           Dictionary<string, decimal> rateMap,
+           int startMatchId)
+       {
+           var matches = new List<MatchedTransaction>();
+           var remainingSharesToSell = sellTransaction.Shares;
+           var matchId = startMatchId;
+           
+           var sellExchangeRate = GetExchangeRate(
+               sellTransaction.Currency,
+               sellTransaction.TransactionDate,
+               rateMap);
+           
+           while (remainingSharesToSell > 0 && queue.BuyPositions.Count > 0)
+           {
+               var buyPosition = queue.BuyPositions.Peek();
+               
+               // Determine how many shares to match
+               var sharesToMatch = Math.Min(remainingSharesToSell, buyPosition.RemainingShares);
+               
+               // Calculate PLN values
+               var buyCostPLN = Math.Round(
+                   sharesToMatch * buyPosition.PricePerShare * buyPosition.ExchangeRate,
+                   DECIMAL_PLACES);
+               
+               var sellProceedsPLN = Math.Round(
+                   sharesToMatch * sellTransaction.PricePerShare * sellExchangeRate,
+                   DECIMAL_PLACES);
+               
+               var gainLossPLN = Math.Round(sellProceedsPLN - buyCostPLN, DECIMAL_PLACES);
+               
+               // Create matched transaction record
+               matches.Add(new MatchedTransaction
+               {
+                   MatchId = matchId++,
+                   ISIN = queue.ISIN,
+                   Ticker = sellTransaction.Ticker,
+                   BuyDate = buyPosition.Date,
+                   BuyShares = sharesToMatch,
+                   BuyPricePerShare = buyPosition.PricePerShare,
+                   BuyCurrency = buyPosition.Currency,
+                   BuyExchangeRate = buyPosition.ExchangeRate,
+                   BuyCostPLN = buyCostPLN,
+                   SellDate = sellTransaction.TransactionDate,
+                   SellShares = sharesToMatch,
+                   SellPricePerShare = sellTransaction.PricePerShare,
+                   SellCurrency = sellTransaction.Currency,
+                   SellExchangeRate = sellExchangeRate,
+                   SellProceedsPLN = sellProceedsPLN,
+                   GainLossPLN = gainLossPLN
+               });
+               
+               _logger.LogDebug(
+                   "Match: Sell {Shares} shares - Cost: {Cost} PLN, Proceeds: {Proceeds} PLN, Gain: {Gain} PLN",
+                   sharesToMatch, buyCostPLN, sellProceedsPLN, gainLossPLN);
+               
+               // Update remaining shares
+               buyPosition.RemainingShares -= sharesToMatch;
+               remainingSharesToSell -= sharesToMatch;
+               
+               // Remove buy position if fully consumed
+               if (buyPosition.RemainingShares == 0)
+               {
+                   queue.BuyPositions.Dequeue();
+               }
+           }
+           
+           if (remainingSharesToSell > 0)
+           {
+               throw new InvalidOperationException(
+                   $"Attempted to sell {remainingSharesToSell} more shares than available " +
+                   $"for {queue.ISIN} on {sellTransaction.TransactionDate:yyyy-MM-dd}");
+           }
+           
+           return matches;
+       }
+       
+       private decimal GetExchangeRate(
+           string currency,
+           DateTime date,
+           Dictionary<string, decimal> rateMap)
+       {
+           // PLN transactions have rate of 1.0
+           if (currency == "PLN")
+               return 1.0m;
+           
+           var key = $"{currency}#{date:yyyy-MM-dd}";
+           
+           if (!rateMap.TryGetValue(key, out var rate))
+           {
+               throw new InvalidOperationException(
+                   $"Exchange rate not found for {currency} on {date:yyyy-MM-dd}");
+           }
+           
+           return rate;
+       }
+   }
+   ```
+
+3. **Implement Lambda Handler**
+
+   Update `Function.cs`:
+   ```csharp
+   using Amazon.Lambda.Core;
+   using Amazon.S3;
+   using InvestTax.Core.Models;
+   using InvestTax.Infrastructure.AWS;
+   using InvestTax.Lambda.Calculator.Services;
+   using InvestTax.Lambda.Calculator.Models;
+   using Microsoft.Extensions.DependencyInjection;
+   using Microsoft.Extensions.Logging;
+   using System.Text.Json;
+   
+   [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
+   
+   namespace InvestTax.Lambda.Calculator;
+   
+   public class Function
+   {
+       private readonly IS3Service _s3Service;
+       private readonly TaxCalculatorService _calculatorService;
+       private readonly ILogger<Function> _logger;
+       
+       public Function()
+       {
+           var services = new ServiceCollection();
+           ConfigureServices(services);
+           var serviceProvider = services.BuildServiceProvider();
+           
+           _s3Service = serviceProvider.GetRequiredService<IS3Service>();
+           _calculatorService = serviceProvider.GetRequiredService<TaxCalculatorService>();
+           _logger = serviceProvider.GetRequiredService<ILogger<Function>>();
+       }
+       
+       private void ConfigureServices(IServiceCollection services)
+       {
+           services.AddLogging(builder =>
+           {
+               builder.AddConsole();
+               builder.AddLambdaLogger();
+           });
+           
+           services.AddAWSService<IAmazonS3>();
+           services.AddSingleton<IS3Service, S3Service>();
+           services.AddSingleton<TaxCalculatorService>();
+       }
+       
+       public async Task<LambdaInput> FunctionHandler(
+           LambdaInput input,
+           ILambdaContext context)
+       {
+           _logger.LogInformation("Starting tax calculation for JobId: {JobId}", input.JobId);
+           
+           try
+           {
+               var processingBucket = Environment.GetEnvironmentVariable("PROCESSING_BUCKET");
+               
+               // Download normalized transactions
+               var normalizedPath = Path.Combine(Path.GetTempPath(), $"{input.JobId}_normalized.json");
+               await _s3Service.DownloadFileAsync(
+                   processingBucket,
+                   input.NormalizedFileKey,
+                   normalizedPath,
+                   context.CancellationToken);
+               
+               var transactionsJson = await File.ReadAllTextAsync(normalizedPath, context.CancellationToken);
+               var transactionGroups = JsonSerializer.Deserialize<Dictionary<string, TransactionGroup>>(transactionsJson);
+               
+               // Download rate map
+               var rateMapPath = Path.Combine(Path.GetTempPath(), $"{input.JobId}_rates.json");
+               await _s3Service.DownloadFileAsync(
+                   processingBucket,
+                   input.RateMapKey,
+                   rateMapPath,
+                   context.CancellationToken);
+               
+               var rateMapJson = await File.ReadAllTextAsync(rateMapPath, context.CancellationToken);
+               var rateMap = JsonSerializer.Deserialize<RateMap>(rateMapJson);
+               
+               // Calculate tax
+               var calculationResult = _calculatorService.CalculateTax(
+                   transactionGroups,
+                   rateMap.Rates,
+                   input.Year);
+               
+               calculationResult.JobId = input.JobId;
+               
+               // Save calculation results
+               var resultPath = Path.Combine(Path.GetTempPath(), $"{input.JobId}_calculation.json");
+               var resultJson = JsonSerializer.Serialize(calculationResult, new JsonSerializerOptions
+               {
+                   WriteIndented = true
+               });
+               await File.WriteAllTextAsync(resultPath, resultJson, context.CancellationToken);
+               
+               var resultKey = $"calculations/{input.JobId}.json";
+               await _s3Service.UploadFileAsync(
+                   processingBucket,
+                   resultKey,
+                   resultPath,
+                   context.CancellationToken);
+               
+               input.CalculationResultKey = resultKey;
+               input.TotalGainPLN = calculationResult.TotalGainPLN;
+               input.TotalTaxPLN = calculationResult.TotalTaxPLN;
+               input.Stage = "CALCULATED";
+               
+               _logger.LogInformation(
+                   "Tax calculation complete: Gain={Gain} PLN, Tax={Tax} PLN",
+                   calculationResult.TotalGainPLN, calculationResult.TotalTaxPLN);
+               
+               // Cleanup
+               File.Delete(normalizedPath);
+               File.Delete(rateMapPath);
+               File.Delete(resultPath);
+               
+               return input;
+           }
+           catch (Exception ex)
+           {
+               _logger.LogError(ex, "Error calculating tax");
+               input.Stage = "CALCULATION_ERROR";
+               input.ErrorMessage = $"Tax calculation failed: {ex.Message}";
+               throw;
+           }
+       }
+   }
+   ```
+
+4. **Configure Lambda Settings**
+
+   Update `aws-lambda-tools-defaults.json`:
+   ```json
+   {
+     "profile": "",
+     "region": "eu-central-1",
+     "configuration": "Release",
+     "function-runtime": "dotnet10",
+     "function-memory-size": 2048,
+     "function-timeout": 600,
+     "function-handler": "InvestTax.Lambda.Calculator::InvestTax.Lambda.Calculator.Function::FunctionHandler",
+     "environment-variables": {
+       "PROCESSING_BUCKET": "investtax-processing-dev"
+     }
+   }
+   ```
+
+5. **Build and Test**
+   ```bash
+   cd src/InvestTax.Lambda.Calculator
+   dotnet build
+   ```
+
+#### Expected Output
+```
+Calculation Result JSON:
+{
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "year": 2024,
+  "totalGainPLN": 15000.50,
+  "totalTaxPLN": 2850.09,
+  "matchedTransactionCount": 45,
+  "matchedTransactions": [
+    {
+      "matchId": 1,
+      "isin": "US0378331005",
+      "ticker": "AAPL",
+      "buyDate": "2024-03-15",
+      "buyShares": 10,
+      "buyPricePerShare": 170.50,
+      "buyCurrency": "USD",
+      "buyExchangeRate": 3.9876,
+      "buyCostPLN": 6797.64,
+      "sellDate": "2024-06-20",
+      "sellShares": 10,
+      "sellPricePerShare": 185.00,
+      "sellCurrency": "USD",
+      "sellExchangeRate": 4.0123,
+      "sellProceedsPLN": 7422.76,
+      "gainLossPLN": 625.12
+    }
+  ]
+}
+```
+
+#### Success Criteria
+- [ ] FIFO algorithm correctly matches buys to sells
+- [ ] Partial fills handled correctly
+- [ ] PLN conversions accurate with proper rounding (2 decimals)
+- [ ] Tax calculated at 19% of total gains
+- [ ] All matched transactions recorded with details
+- [ ] Remaining (unsold) positions logged
+- [ ] Error thrown if attempting to sell more than available
+
+#### Troubleshooting
+- **FIFO matching errors**: Verify transactions sorted by date
+- **Decimal precision issues**: Ensure using decimal type, not float/double
+- **Missing exchange rates**: Verify rate map contains all required dates
+- **Sell exceeds buy**: Check validation logic in earlier stages
+
+---
+
+### Step 10: Report Generator Lambda Implementation
+
+**Duration**: 3-4 hours  
+**Dependencies**: Step 9  
+**Prerequisites**: Tax calculation results available
+
+#### Objective
+Implement Lambda function to generate human-readable plain text report summarizing tax calculation results (MVP: text only, Phase 2 adds HTML).
+
+#### Technology Stack
+- **.NET Runtime**: 10.0
+- **Template Engine**: StringBuilder (simple text formatting)
+- **Formatting**: String interpolation and formatting
+
+#### Actions
+
+1. **Create Report Models**
+
+   Create `Models/ReportModels.cs`:
+   ```csharp
+   namespace InvestTax.Lambda.ReportGenerator.Models;
+   
+   public class TaxReport
+   {
+       public string JobId { get; set; }
+       public int Year { get; set; }
+       public DateTime GeneratedDate { get; set; }
+       public string TextReportKey { get; set; }
+       
+       // Summary data
+       public decimal TotalGainPLN { get; set; }
+       public decimal TotalTaxPLN { get; set; }
+       public int TransactionCount { get; set; }
+       
+       // Detailed transactions
+       public List<MatchedTransaction> Transactions { get; set; } = new();
+   }
+   ```
+
+2. **Create Report Generator Service**
+
+   Create `Services/ReportGeneratorService.cs`:
+   ```csharp
+   using InvestTax.Lambda.ReportGenerator.Models;
+   using InvestTax.Lambda.Calculator.Models;
+   using System.Text;
+   
+   namespace InvestTax.Lambda.ReportGenerator.Services;
+   
+   public class ReportGeneratorService
+   {
+       private readonly ILogger<ReportGeneratorService> _logger;
+       
+       public ReportGeneratorService(ILogger<ReportGeneratorService> logger)
+       {
+           _logger = logger;
+       }
+       
+       public string GenerateTextReport(TaxCalculationResult calculation)
+       {
+           var sb = new StringBuilder();
+           
+           // Header
+           sb.AppendLine("═══════════════════════════════════════════════════════════════");
+           sb.AppendLine("           POLISH CAPITAL GAINS TAX CALCULATION (PIT-38)       ");
+           sb.AppendLine("═══════════════════════════════════════════════════════════════");
+           sb.AppendLine();
+           sb.AppendLine($"Report Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
+           sb.AppendLine($"Job ID: {calculation.JobId}");
+           sb.AppendLine($"Tax Year: {calculation.Year}");
+           sb.AppendLine();
+           
+           // Summary Section
+           sb.AppendLine("───────────────────────────────────────────────────────────────");
+           sb.AppendLine("  SUMMARY");
+           sb.AppendLine("───────────────────────────────────────────────────────────────");
+           sb.AppendLine();
+           sb.AppendLine($"  Total Capital Gain:     {calculation.TotalGainPLN,15:N2} PLN");
+           sb.AppendLine($"  Tax Rate:               {19,15:N0}%");
+           sb.AppendLine($"  Total Tax Owed:         {calculation.TotalTaxPLN,15:N2} PLN");
+           sb.AppendLine();
+           sb.AppendLine($"  Matched Transactions:   {calculation.MatchedTransactionCount,15:N0}");
+           sb.AppendLine();
+           
+           // Methodology Section
+           sb.AppendLine("───────────────────────────────────────────────────────────────");
+           sb.AppendLine("  METHODOLOGY");
+           sb.AppendLine("───────────────────────────────────────────────────────────────");
+           sb.AppendLine();
+           sb.AppendLine("  • FIFO Matching: First-In, First-Out method for buy-sell matching");
+           sb.AppendLine("  • Exchange Rates: National Bank of Poland (NBP) official rates");
+           sb.AppendLine("  • Tax Rate: 19% flat rate on capital gains (Polish tax law)");
+           sb.AppendLine("  • Rounding: All PLN amounts rounded to 2 decimal places");
+           sb.AppendLine();
+           
+           // Detailed Transactions
+           sb.AppendLine("───────────────────────────────────────────────────────────────");
+           sb.AppendLine("  DETAILED TRANSACTIONS");
+           sb.AppendLine("───────────────────────────────────────────────────────────────");
+           sb.AppendLine();
+           
+           // Group by ISIN
+           var groupedByISIN = calculation.MatchedTransactions
+               .GroupBy(t => t.ISIN)
+               .OrderBy(g => g.Key);
+           
+           foreach (var isinGroup in groupedByISIN)
+           {
+               var isin = isinGroup.Key;
+               var ticker = isinGroup.First().Ticker;
+               var totalGainForISIN = isinGroup.Sum(t => t.GainLossPLN);
+               
+               sb.AppendLine($"▸ {ticker} ({isin})");
+               sb.AppendLine($"  Total Gain/Loss: {totalGainForISIN:N2} PLN");
+               sb.AppendLine();
+               
+               foreach (var match in isinGroup.OrderBy(t => t.SellDate))
+               {
+                   sb.AppendLine($"  Match #{match.MatchId}:");
+                   sb.AppendLine($"    BUY:  {match.BuyDate:yyyy-MM-dd}");
+                   sb.AppendLine($"          {match.BuyShares:N4} shares @ {match.BuyPricePerShare:N2} {match.BuyCurrency}");
+                   sb.AppendLine($"          Exchange Rate: {match.BuyExchangeRate:N4} PLN/{match.BuyCurrency}");
+                   sb.AppendLine($"          Cost: {match.BuyCostPLN:N2} PLN");
+                   sb.AppendLine();
+                   sb.AppendLine($"    SELL: {match.SellDate:yyyy-MM-dd}");
+                   sb.AppendLine($"          {match.SellShares:N4} shares @ {match.SellPricePerShare:N2} {match.SellCurrency}");
+                   sb.AppendLine($"          Exchange Rate: {match.SellExchangeRate:N4} PLN/{match.SellCurrency}");
+                   sb.AppendLine($"          Proceeds: {match.SellProceedsPLN:N2} PLN");
+                   sb.AppendLine();
+                   
+                   var gainLabel = match.GainLossPLN >= 0 ? "GAIN" : "LOSS";
+                   sb.AppendLine($"    {gainLabel}: {match.GainLossPLN:N2} PLN");
+                   sb.AppendLine();
+                   sb.AppendLine("  " + new string('-', 60));
+                   sb.AppendLine();
+               }
+           }
+           
+           // Disclaimer
+           sb.AppendLine();
+           sb.AppendLine("═══════════════════════════════════════════════════════════════");
+           sb.AppendLine("  IMPORTANT DISCLAIMER");
+           sb.AppendLine("═══════════════════════════════════════════════════════════════");
+           sb.AppendLine();
+           sb.AppendLine("This calculation is provided for INFORMATIONAL PURPOSES ONLY.");
+           sb.AppendLine();
+           sb.AppendLine("• This is NOT official tax advice");
+           sb.AppendLine("• You are responsible for verifying all calculations");
+           sb.AppendLine("• Polish tax law is subject to change");
+           sb.AppendLine("• Corporate actions (splits, dividends) must be handled separately");
+           sb.AppendLine("• Consult a qualified tax professional before filing");
+           sb.AppendLine();
+           sb.AppendLine("Data Sources:");
+           sb.AppendLine("• Exchange Rates: National Bank of Poland (NBP) official rates");
+           sb.AppendLine("• Methodology: FIFO (First-In, First-Out) matching");
+           sb.AppendLine();
+           sb.AppendLine("═══════════════════════════════════════════════════════════════");
+           sb.AppendLine("              END OF REPORT");
+           sb.AppendLine("═══════════════════════════════════════════════════════════════");
+           
+           var report = sb.ToString();
+           
+           _logger.LogInformation(
+               "Generated text report: {Length} characters",
+               report.Length);
+           
+           return report;
+       }
+   }
+   ```
+
+3. **Implement Lambda Handler**
+
+   Update `Function.cs`:
+   ```csharp
+   using Amazon.Lambda.Core;
+   using Amazon.S3;
+   using InvestTax.Core.Models;
+   using InvestTax.Infrastructure.AWS;
+   using InvestTax.Lambda.ReportGenerator.Services;
+   using InvestTax.Lambda.Calculator.Models;
+   using Microsoft.Extensions.DependencyInjection;
+   using Microsoft.Extensions.Logging;
+   using System.Text;
+   using System.Text.Json;
+   
+   [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
+   
+   namespace InvestTax.Lambda.ReportGenerator;
+   
+   public class Function
+   {
+       private readonly IS3Service _s3Service;
+       private readonly ReportGeneratorService _reportGenerator;
+       private readonly ILogger<Function> _logger;
+       
+       public Function()
+       {
+           var services = new ServiceCollection();
+           ConfigureServices(services);
+           var serviceProvider = services.BuildServiceProvider();
+           
+           _s3Service = serviceProvider.GetRequiredService<IS3Service>();
+           _reportGenerator = serviceProvider.GetRequiredService<ReportGeneratorService>();
+           _logger = serviceProvider.GetRequiredService<ILogger<Function>>();
+       }
+       
+       private void ConfigureServices(IServiceCollection services)
+       {
+           services.AddLogging(builder =>
+           {
+               builder.AddConsole();
+               builder.AddLambdaLogger();
+           });
+           
+           services.AddAWSService<IAmazonS3>();
+           services.AddSingleton<IS3Service, S3Service>();
+           services.AddSingleton<ReportGeneratorService>();
+       }
+       
+       public async Task<LambdaInput> FunctionHandler(
+           LambdaInput input,
+           ILambdaContext context)
+       {
+           _logger.LogInformation("Starting report generation for JobId: {JobId}", input.JobId);
+           
+           try
+           {
+               var processingBucket = Environment.GetEnvironmentVariable("PROCESSING_BUCKET");
+               
+               // Download calculation results
+               var calculationPath = Path.Combine(Path.GetTempPath(), $"{input.JobId}_calculation.json");
+               await _s3Service.DownloadFileAsync(
+                   processingBucket,
+                   input.CalculationResultKey,
+                   calculationPath,
+                   context.CancellationToken);
+               
+               var calculationJson = await File.ReadAllTextAsync(calculationPath, context.CancellationToken);
+               var calculation = JsonSerializer.Deserialize<TaxCalculationResult>(calculationJson);
+               
+               // Generate text report
+               var textReport = _reportGenerator.GenerateTextReport(calculation);
+               
+               // Save text report
+               var textReportPath = Path.Combine(Path.GetTempPath(), $"{input.JobId}_report.txt");
+               await File.WriteAllTextAsync(textReportPath, textReport, Encoding.UTF8, context.CancellationToken);
+               
+               var textReportKey = $"reports/{input.JobId}.txt";
+               await _s3Service.UploadFileAsync(
+                   processingBucket,
+                   textReportKey,
+                   textReportPath,
+                   context.CancellationToken);
+               
+               input.TextReportKey = textReportKey;
+               input.Stage = "REPORT_GENERATED";
+               
+               _logger.LogInformation("Report generation complete");
+               
+               // Cleanup
+               File.Delete(calculationPath);
+               File.Delete(textReportPath);
+               
+               return input;
+           }
+           catch (Exception ex)
+           {
+               _logger.LogError(ex, "Error generating report");
+               input.Stage = "REPORT_ERROR";
+               input.ErrorMessage = $"Report generation failed: {ex.Message}";
+               throw;
+           }
+       }
+   }
+   ```
+
+4. **Configure Lambda Settings**
+
+   Update `aws-lambda-tools-defaults.json`:
+   ```json
+   {
+     "profile": "",
+     "region": "eu-central-1",
+     "configuration": "Release",
+     "function-runtime": "dotnet10",
+     "function-memory-size": 512,
+     "function-timeout": 180,
+     "function-handler": "InvestTax.Lambda.ReportGenerator::InvestTax.Lambda.ReportGenerator.Function::FunctionHandler",
+     "environment-variables": {
+       "PROCESSING_BUCKET": "investtax-processing-dev"
+     }
+   }
+   ```
+
+5. **Build and Test**
+   ```bash
+   cd src/InvestTax.Lambda.ReportGenerator
+   dotnet build
+   ```
+
+#### Expected Output
+```
+Text Report Sample:
+═══════════════════════════════════════════════════════════════
+           POLISH CAPITAL GAINS TAX CALCULATION (PIT-38)       
+═══════════════════════════════════════════════════════════════
+
+Report Generated: 2024-06-20 15:30:00 UTC
+Job ID: 550e8400-e29b-41d4-a716-446655440000
+Tax Year: 2024
+
+───────────────────────────────────────────────────────────────
+  SUMMARY
+───────────────────────────────────────────────────────────────
+
+  Total Capital Gain:        15,000.50 PLN
+  Tax Rate:                          19%
+  Total Tax Owed:             2,850.09 PLN
+
+  Matched Transactions:              45
+
+[... detailed transactions ...]
+
+Lambda Output:
+{
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "stage": "REPORT_GENERATED",
+  "textReportKey": "reports/550e8400-e29b-41d4-a716-446655440000.txt"
+}
+```
+
+#### Success Criteria
+- [ ] Text report generated with proper formatting
+- [ ] Summary section displays key metrics
+- [ ] Detailed transactions grouped by ISIN
+- [ ] Methodology and disclaimer included
+- [ ] UTF-8 encoding preserved
+- [ ] Report uploaded to S3 successfully
+
+#### Troubleshooting
+- **Formatting issues**: Check StringBuilder line breaks and spacing
+- **Encoding errors**: Ensure UTF-8 encoding when writing files
+- **Missing data**: Verify calculation JSON deserialization
+- **Large reports**: Increase timeout for files with many transactions
+
+---
+
+### Step 11: Email Sender Lambda Implementation
+
+**Duration**: 3-4 hours  
+**Dependencies**: Step 10  
+**Prerequisites**: SES configured and verified
+
+#### Objective
+Implement Lambda function to send tax calculation reports via Amazon SES with both success and error email templates.
+
+#### Technology Stack
+- **.NET Runtime**: 10.0
+- **Email Service**: Amazon SES via AWSSDK.SimpleEmail
+- **Templates**: String-based email templates
+
+#### Actions
+
+1. **Add NuGet Packages**
+   ```bash
+   cd src/InvestTax.Lambda.EmailSender
+   dotnet add package AWSSDK.SimpleEmail --version 3.7.400
+   ```
+
+2. **Create Email Models**
+
+   Create `Models/EmailModels.cs`:
+   ```csharp
+   namespace InvestTax.Lambda.EmailSender.Models;
+   
+   public class EmailRequest
+   {
+       public string ToAddress { get; set; }
+       public string Subject { get; set; }
+       public string TextBody { get; set; }
+       public string HtmlBody { get; set; }
+       public List<Attachment> Attachments { get; set; } = new();
+   }
+   
+   public class Attachment
+   {
+       public string FileName { get; set; }
+       public byte[] Content { get; set; }
+       public string ContentType { get; set; }
+   }
+   
+   public class EmailResult
+   {
+       public bool Success { get; set; }
+       public string MessageId { get; set; }
+       public string ErrorMessage { get; set; }
+   }
+   ```
+
+3. **Create Email Service**
+
+   Create `Services/EmailService.cs`:
+   ```csharp
+   using Amazon.SimpleEmail;
+   using Amazon.SimpleEmail.Model;
+   using InvestTax.Lambda.EmailSender.Models;
+   using System.Text;
+   
+   namespace InvestTax.Lambda.EmailSender.Services;
+   
+   public class EmailService
+   {
+       private readonly IAmazonSimpleEmailService _sesClient;
+       private readonly ILogger<EmailService> _logger;
+       private readonly string _fromAddress;
+       
+       public EmailService(
+           IAmazonSimpleEmailService sesClient,
+           ILogger<EmailService> logger)
+       {
+           _sesClient = sesClient;
+           _logger = logger;
+           _fromAddress = Environment.GetEnvironmentVariable("SES_FROM_EMAIL") 
+               ?? "noreply@investtax.example.com";
+       }
+       
+       public async Task<EmailResult> SendSuccessEmailAsync(
+           string toAddress,
+           string reportContent,
+           string jobId,
+           decimal totalGainPLN,
+           decimal totalTaxPLN,
+           int year,
+           CancellationToken cancellationToken)
+       {
+           var subject = $"InvestTax Calculator - Tax Report {year} (Job: {jobId})";
+           
+           var textBody = BuildSuccessEmailText(
+               reportContent,
+               jobId,
+               totalGainPLN,
+               totalTaxPLN,
+               year);
+           
+           var htmlBody = BuildSuccessEmailHtml(
+               jobId,
+               totalGainPLN,
+               totalTaxPLN,
+               year);
+           
+           return await SendEmailAsync(
+               toAddress,
+               subject,
+               textBody,
+               htmlBody,
+               cancellationToken);
+       }
+       
+       public async Task<EmailResult> SendErrorEmailAsync(
+           string toAddress,
+           string jobId,
+           string stage,
+           string errorMessage,
+           CancellationToken cancellationToken)
+       {
+           var subject = $"InvestTax Calculator - Processing Error (Job: {jobId})";
+           
+           var textBody = BuildErrorEmailText(jobId, stage, errorMessage);
+           var htmlBody = BuildErrorEmailHtml(jobId, stage, errorMessage);
+           
+           return await SendEmailAsync(
+               toAddress,
+               subject,
+               textBody,
+               htmlBody,
+               cancellationToken);
+       }
+       
+       private async Task<EmailResult> SendEmailAsync(
+           string toAddress,
+           string subject,
+           string textBody,
+           string htmlBody,
+           CancellationToken cancellationToken)
+       {
+           try
+           {
+               var request = new SendEmailRequest
+               {
+                   Source = _fromAddress,
+                   Destination = new Destination
+                   {
+                       ToAddresses = new List<string> { toAddress }
+                   },
+                   Message = new Amazon.SimpleEmail.Model.Message
+                   {
+                       Subject = new Content(subject),
+                       Body = new Body
+                       {
+                           Text = new Content(textBody),
+                           Html = new Content(htmlBody)
+                       }
+                   }
+               };
+               
+               _logger.LogInformation(
+                   "Sending email to {ToAddress} with subject: {Subject}",
+                   toAddress, subject);
+               
+               var response = await _sesClient.SendEmailAsync(request, cancellationToken);
+               
+               _logger.LogInformation(
+                   "Email sent successfully. MessageId: {MessageId}",
+                   response.MessageId);
+               
+               return new EmailResult
+               {
+                   Success = true,
+                   MessageId = response.MessageId
+               };
+           }
+           catch (Exception ex)
+           {
+               _logger.LogError(ex, "Failed to send email to {ToAddress}", toAddress);
+               
+               return new EmailResult
+               {
+                   Success = false,
+                   ErrorMessage = ex.Message
+               };
+           }
+       }
+       
+       private string BuildSuccessEmailText(
+           string reportContent,
+           string jobId,
+           decimal totalGainPLN,
+           decimal totalTaxPLN,
+           int year)
+       {
+           var sb = new StringBuilder();
+           
+           sb.AppendLine("InvestTax Calculator - Tax Calculation Complete");
+           sb.AppendLine();
+           sb.AppendLine($"Your tax calculation for year {year} has been completed successfully.");
+           sb.AppendLine();
+           sb.AppendLine("SUMMARY:");
+           sb.AppendLine($"  Job ID: {jobId}");
+           sb.AppendLine($"  Tax Year: {year}");
+           sb.AppendLine($"  Total Capital Gain: {totalGainPLN:N2} PLN");
+           sb.AppendLine($"  Total Tax Owed (19%): {totalTaxPLN:N2} PLN");
+           sb.AppendLine();
+           sb.AppendLine("DETAILED REPORT:");
+           sb.AppendLine(new string('=', 70));
+           sb.AppendLine();
+           sb.AppendLine(reportContent);
+           sb.AppendLine();
+           sb.AppendLine(new string('=', 70));
+           sb.AppendLine();
+           sb.AppendLine("IMPORTANT: This calculation is for informational purposes only.");
+           sb.AppendLine("Please verify all amounts and consult a tax professional before filing.");
+           sb.AppendLine();
+           sb.AppendLine("Thank you for using InvestTax Calculator!");
+           
+           return sb.ToString();
+       }
+       
+       private string BuildSuccessEmailHtml(
+           string jobId,
+           decimal totalGainPLN,
+           decimal totalTaxPLN,
+           int year)
+       {
+           return $@"
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+        .header {{ background-color: #4CAF50; color: white; padding: 20px; text-align: center; }}
+        .content {{ padding: 20px; background-color: #f9f9f9; }}
+        .summary {{ background-color: white; padding: 15px; margin: 20px 0; border-left: 4px solid #4CAF50; }}
+        .footer {{ padding: 20px; text-align: center; font-size: 12px; color: #666; }}
+        .disclaimer {{ background-color: #fff3cd; padding: 15px; margin: 20px 0; border-left: 4px solid #ffc107; }}
+    </style>
+</head>
+<body>
+    <div class='container'>
+        <div class='header'>
+            <h1>✓ Tax Calculation Complete</h1>
+        </div>
+        <div class='content'>
+            <p>Your tax calculation for year <strong>{year}</strong> has been completed successfully.</p>
+            
+            <div class='summary'>
+                <h2>Summary</h2>
+                <p><strong>Job ID:</strong> {jobId}</p>
+                <p><strong>Tax Year:</strong> {year}</p>
+                <p><strong>Total Capital Gain:</strong> {totalGainPLN:N2} PLN</p>
+                <p><strong>Total Tax Owed (19%):</strong> {totalTaxPLN:N2} PLN</p>
+            </div>
+            
+            <p>The detailed report is included in the plain text version of this email (view below).</p>
+            
+            <div class='disclaimer'>
+                <h3>⚠ Important Disclaimer</h3>
+                <p>This calculation is for <strong>informational purposes only</strong>.</p>
+                <p>• This is not official tax advice</p>
+                <p>• Verify all amounts before filing</p>
+                <p>• Consult a qualified tax professional</p>
+            </div>
+        </div>
+        <div class='footer'>
+            <p>Thank you for using InvestTax Calculator</p>
+            <p>© 2024 InvestTax Calculator. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>";
+       }
+       
+       private string BuildErrorEmailText(
+           string jobId,
+           string stage,
+           string errorMessage)
+       {
+           var sb = new StringBuilder();
+           
+           sb.AppendLine("InvestTax Calculator - Processing Error");
+           sb.AppendLine();
+           sb.AppendLine("Unfortunately, your tax calculation could not be completed.");
+           sb.AppendLine();
+           sb.AppendLine("ERROR DETAILS:");
+           sb.AppendLine($"  Job ID: {jobId}");
+           sb.AppendLine($"  Stage: {stage}");
+           sb.AppendLine($"  Error: {errorMessage}");
+           sb.AppendLine();
+           sb.AppendLine("WHAT TO DO NEXT:");
+           sb.AppendLine();
+           
+           if (stage.Contains("VALIDATION"))
+           {
+               sb.AppendLine("• Review the error message above for specific validation issues");
+               sb.AppendLine("• Check that your CSV file uses pipe (|) delimiters");
+               sb.AppendLine("• Ensure all required columns are present with correct headers");
+               sb.AppendLine("• Verify that dates are in valid format (YYYY-MM-DD or ISO 8601)");
+               sb.AppendLine("• Check that numeric values are positive and properly formatted");
+               sb.AppendLine("• Correct the issues and re-upload your file");
+           }
+           else if (stage.Contains("RATE"))
+           {
+               sb.AppendLine("• The system could not fetch exchange rates from NBP API");
+               sb.AppendLine("• This may be a temporary issue with the external API");
+               sb.AppendLine("• Try uploading your file again in a few minutes");
+               sb.AppendLine("• If the problem persists, contact support");
+           }
+           else
+           {
+               sb.AppendLine("• An unexpected error occurred during processing");
+               sb.AppendLine("• Please contact support with the Job ID above");
+               sb.AppendLine("• We apologize for the inconvenience");
+           }
+           
+           sb.AppendLine();
+           sb.AppendLine("If you need assistance, please contact support@investtax.example.com");
+           sb.AppendLine($"Include Job ID: {jobId}");
+           
+           return sb.ToString();
+       }
+       
+       private string BuildErrorEmailHtml(
+           string jobId,
+           string stage,
+           string errorMessage)
+       {
+           return $@"
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+        .header {{ background-color: #dc3545; color: white; padding: 20px; text-align: center; }}
+        .content {{ padding: 20px; background-color: #f9f9f9; }}
+        .error-box {{ background-color: #f8d7da; padding: 15px; margin: 20px 0; border-left: 4px solid #dc3545; }}
+        .action-box {{ background-color: white; padding: 15px; margin: 20px 0; border-left: 4px solid #007bff; }}
+        .footer {{ padding: 20px; text-align: center; font-size: 12px; color: #666; }}
+    </style>
+</head>
+<body>
+    <div class='container'>
+        <div class='header'>
+            <h1>✗ Processing Error</h1>
+        </div>
+        <div class='content'>
+            <p>Unfortunately, your tax calculation could not be completed.</p>
+            
+            <div class='error-box'>
+                <h2>Error Details</h2>
+                <p><strong>Job ID:</strong> {jobId}</p>
+                <p><strong>Stage:</strong> {stage}</p>
+                <p><strong>Error:</strong> {errorMessage}</p>
+            </div>
+            
+            <div class='action-box'>
+                <h2>What to Do Next</h2>
+                <ul>
+                    <li>Review the error message above</li>
+                    <li>Correct any issues in your CSV file</li>
+                    <li>Re-upload your file to try again</li>
+                </ul>
+            </div>
+            
+            <p>If you need assistance, please contact <a href='mailto:support@investtax.example.com'>support@investtax.example.com</a> and include Job ID: <strong>{jobId}</strong></p>
+        </div>
+        <div class='footer'>
+            <p>InvestTax Calculator</p>
+        </div>
+    </div>
+</body>
+</html>";
+       }
+   }
+   ```
+
+4. **Implement Lambda Handler**
+
+   Update `Function.cs`:
+   ```csharp
+   using Amazon.Lambda.Core;
+   using Amazon.S3;
+   using Amazon.SimpleEmail;
+   using InvestTax.Core.Models;
+   using InvestTax.Infrastructure.AWS;
+   using InvestTax.Lambda.EmailSender.Services;
+   using Microsoft.Extensions.DependencyInjection;
+   using Microsoft.Extensions.Logging;
+   
+   [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
+   
+   namespace InvestTax.Lambda.EmailSender;
+   
+   public class Function
+   {
+       private readonly IS3Service _s3Service;
+       private readonly EmailService _emailService;
+       private readonly ILogger<Function> _logger;
+       
+       public Function()
+       {
+           var services = new ServiceCollection();
+           ConfigureServices(services);
+           var serviceProvider = services.BuildServiceProvider();
+           
+           _s3Service = serviceProvider.GetRequiredService<IS3Service>();
+           _emailService = serviceProvider.GetRequiredService<EmailService>();
+           _logger = serviceProvider.GetRequiredService<ILogger<Function>>();
+       }
+       
+       private void ConfigureServices(IServiceCollection services)
+       {
+           services.AddLogging(builder =>
+           {
+               builder.AddConsole();
+               builder.AddLambdaLogger();
+           });
+           
+           services.AddAWSService<IAmazonS3>();
+           services.AddAWSService<IAmazonSimpleEmailService>();
+           services.AddSingleton<IS3Service, S3Service>();
+           services.AddSingleton<EmailService>();
+       }
+       
+       public async Task<LambdaInput> FunctionHandler(
+           LambdaInput input,
+           ILambdaContext context)
+       {
+           _logger.LogInformation("Starting email send for JobId: {JobId}", input.JobId);
+           
+           try
+           {
+               var processingBucket = Environment.GetEnvironmentVariable("PROCESSING_BUCKET");
+               EmailResult result;
+               
+               if (input.Stage == "REPORT_GENERATED")
+               {
+                   // Success email with report
+                   var reportPath = Path.Combine(Path.GetTempPath(), $"{input.JobId}_report.txt");
+                   await _s3Service.DownloadFileAsync(
+                       processingBucket,
+                       input.TextReportKey,
+                       reportPath,
+                       context.CancellationToken);
+                   
+                   var reportContent = await File.ReadAllTextAsync(reportPath, context.CancellationToken);
+                   
+                   result = await _emailService.SendSuccessEmailAsync(
+                       input.Email,
+                       reportContent,
+                       input.JobId,
+                       input.TotalGainPLN,
+                       input.TotalTaxPLN,
+                       input.Year,
+                       context.CancellationToken);
+                   
+                   File.Delete(reportPath);
+               }
+               else
+               {
+                   // Error email
+                   result = await _emailService.SendErrorEmailAsync(
+                       input.Email,
+                       input.JobId,
+                       input.Stage,
+                       input.ErrorMessage ?? "Unknown error",
+                       context.CancellationToken);
+               }
+               
+               if (result.Success)
+               {
+                   input.Stage = "EMAIL_SENT";
+                   input.EmailMessageId = result.MessageId;
+                   _logger.LogInformation("Email sent successfully. MessageId: {MessageId}", result.MessageId);
+               }
+               else
+               {
+                   input.Stage = "EMAIL_FAILED";
+                   input.ErrorMessage = result.ErrorMessage;
+                   _logger.LogError("Email sending failed: {Error}", result.ErrorMessage);
+               }
+               
+               return input;
+           }
+           catch (Exception ex)
+           {
+               _logger.LogError(ex, "Error in email sender");
+               input.Stage = "EMAIL_ERROR";
+               input.ErrorMessage = ex.Message;
+               throw;
+           }
+       }
+   }
+   ```
+
+5. **Configure Lambda Settings**
+
+   Update `aws-lambda-tools-defaults.json`:
+   ```json
+   {
+     "profile": "",
+     "region": "eu-central-1",
+     "configuration": "Release",
+     "function-runtime": "dotnet10",
+     "function-memory-size": 256,
+     "function-timeout": 60,
+     "function-handler": "InvestTax.Lambda.EmailSender::InvestTax.Lambda.EmailSender.Function::FunctionHandler",
+     "environment-variables": {
+       "PROCESSING_BUCKET": "investtax-processing-dev",
+       "SES_FROM_EMAIL": "noreply@investtax.example.com"
+     }
+   }
+   ```
+
+6. **Build and Test**
+   ```bash
+   cd src/InvestTax.Lambda.EmailSender
+   dotnet build
+   ```
+
+#### Expected Output
+```
+Success Email Headers:
+From: noreply@investtax.example.com
+To: user@example.com
+Subject: InvestTax Calculator - Tax Report 2024 (Job: 550e8400...)
+
+Lambda Output:
+{
+  "jobId": "550e8400-e29b-41d4-a716-446655440000",
+  "stage": "EMAIL_SENT",
+  "emailMessageId": "010001234567abcd-12345678-1234-1234-1234-123456789abc-000000"
+}
+```
+
+#### Success Criteria
+- [ ] SES client configured correctly
+- [ ] Success emails sent with report content
+- [ ] Error emails sent with actionable guidance
+- [ ] Both HTML and plain text versions included
+- [ ] Email delivery confirmed via SES MessageId
+- [ ] From address properly configured
+
+#### Troubleshooting
+- **Email not verified**: Verify sender email in SES console
+- **Access denied**: Check Lambda execution role has SES permissions
+- **Email not received**: Check spam folder, verify SES sandbox restrictions
+- **HTML rendering issues**: Test email in multiple clients
+
+---
+
+## PHASE 3: ORCHESTRATION AND INTEGRATION
+
+---
+
+### Step 12: Step Functions State Machine Implementation
+
+**Duration**: 4-5 hours  
+**Dependencies**: Steps 6-11  
+**Prerequisites**: All Lambda functions deployed
+
+#### Objective
+Create Step Functions state machine to orchestrate the 8-stage processing workflow with error handling and retry logic.
+
+#### Technology Stack
+- **Orchestration**: AWS Step Functions (Standard Workflow)
+- **Definition**: Amazon States Language (ASL) JSON
+- **Integration**: Lambda function invocations
+
+#### Actions
+
+1. **Create State Machine Definition**
+
+   Create `infrastructure/step-functions/workflow-definition.json`:
+   ```json
+   {
+     "Comment": "InvestTax Calculator - Processing Workflow",
+     "StartAt": "ExtractMetadata",
+     "TimeoutSeconds": 900,
+     "States": {
+       "ExtractMetadata": {
+         "Type": "Task",
+         "Comment": "Extract metadata from S3 event and create job record",
+         "Resource": "arn:aws:states:::dynamodb:putItem",
+         "Parameters": {
+           "TableName": "${JobsTableName}",
+           "Item": {
+             "job_id": {
+               "S.$": "$.jobId"
+             },
+             "email": {
+               "S.$": "$.email"
+             },
+             "upload_time": {
+               "S.$": "$$.State.EnteredTime"
+             },
+             "status": {
+               "S": "PENDING"
+             },
+             "stage": {
+               "S": "METADATA_EXTRACTED"
+             },
+             "file_key": {
+               "S.$": "$.fileKey"
+             },
+             "year": {
+               "N.$": "States.Format('{}', $.year)"
+             }
+           }
+         },
+         "ResultPath": "$.dynamoResult",
+         "Next": "ValidateCSV",
+         "Catch": [
+           {
+             "ErrorEquals": ["States.ALL"],
+             "ResultPath": "$.error",
+             "Next": "HandleMetadataError"
+           }
+         ]
+       },
+       
+       "ValidateCSV": {
+         "Type": "Task",
+         "Comment": "Validate CSV structure and data types",
+         "Resource": "${ValidatorLambdaArn}",
+         "Retry": [
+           {
+             "ErrorEquals": [
+               "Lambda.ServiceException",
+               "Lambda.AWSLambdaException",
+               "Lambda.SdkClientException"
+             ],
+             "IntervalSeconds": 2,
+             "MaxAttempts": 3,
+             "BackoffRate": 2.0
+           }
+         ],
+         "Next": "CheckValidationResult",
+         "Catch": [
+           {
+             "ErrorEquals": ["States.ALL"],
+             "ResultPath": "$.error",
+             "Next": "UpdateJobFailed"
+           }
+         ]
+       },
+       
+       "CheckValidationResult": {
+         "Type": "Choice",
+         "Comment": "Check if validation passed",
+         "Choices": [
+           {
+             "Variable": "$.stage",
+             "StringEquals": "VALIDATION_FAILED",
+             "Next": "SendValidationErrorEmail"
+           }
+         ],
+         "Default": "NormalizeData"
+       },
+       
+       "SendValidationErrorEmail": {
+         "Type": "Task",
+         "Resource": "${EmailSenderLambdaArn}",
+         "Next": "UpdateJobFailed"
+       },
+       
+       "NormalizeData": {
+         "Type": "Task",
+         "Comment": "Normalize dates, currencies, and numbers",
+         "Resource": "${NormalizerLambdaArn}",
+         "Retry": [
+           {
+             "ErrorEquals": [
+               "Lambda.ServiceException",
+               "Lambda.AWSLambdaException",
+               "Lambda.SdkClientException"
+             ],
+             "IntervalSeconds": 2,
+             "MaxAttempts": 3,
+             "BackoffRate": 2.0
+           }
+         ],
+         "Next": "FetchNBPRates",
+         "Catch": [
+           {
+             "ErrorEquals": ["States.ALL"],
+             "ResultPath": "$.error",
+             "Next": "UpdateJobFailed"
+           }
+         ]
+       },
+       
+       "FetchNBPRates": {
+         "Type": "Task",
+         "Comment": "Fetch exchange rates from NBP API",
+         "Resource": "${NBPClientLambdaArn}",
+         "Retry": [
+           {
+             "ErrorEquals": [
+               "Lambda.ServiceException",
+               "Lambda.AWSLambdaException",
+               "Lambda.SdkClientException"
+             ],
+             "IntervalSeconds": 2,
+             "MaxAttempts": 3,
+             "BackoffRate": 2.0
+           }
+         ],
+         "Next": "CheckRateFetchResult",
+         "Catch": [
+           {
+             "ErrorEquals": ["States.ALL"],
+             "ResultPath": "$.error",
+             "Next": "SendRateErrorEmail"
+           }
+         ]
+       },
+       
+       "CheckRateFetchResult": {
+         "Type": "Choice",
+         "Comment": "Check if rates were fetched successfully",
+         "Choices": [
+           {
+             "Variable": "$.stage",
+             "StringEquals": "RATE_FETCH_ERROR",
+             "Next": "SendRateErrorEmail"
+           }
+         ],
+         "Default": "CalculateTax"
+       },
+       
+       "SendRateErrorEmail": {
+         "Type": "Task",
+         "Resource": "${EmailSenderLambdaArn}",
+         "Next": "UpdateJobFailed"
+       },
+       
+       "CalculateTax": {
+         "Type": "Task",
+         "Comment": "Calculate tax using FIFO matching",
+         "Resource": "${CalculatorLambdaArn}",
+         "Retry": [
+           {
+             "ErrorEquals": [
+               "Lambda.ServiceException",
+               "Lambda.AWSLambdaException",
+               "Lambda.SdkClientException"
+             ],
+             "IntervalSeconds": 2,
+             "MaxAttempts": 3,
+             "BackoffRate": 2.0
+           }
+         ],
+         "Next": "GenerateReport",
+         "Catch": [
+           {
+             "ErrorEquals": ["States.ALL"],
+             "ResultPath": "$.error",
+             "Next": "UpdateJobFailed"
+           }
+         ]
+       },
+       
+       "GenerateReport": {
+         "Type": "Task",
+         "Comment": "Generate human-readable report",
+         "Resource": "${ReportGeneratorLambdaArn}",
+         "Retry": [
+           {
+             "ErrorEquals": [
+               "Lambda.ServiceException",
+               "Lambda.AWSLambdaException",
+               "Lambda.SdkClientException"
+             ],
+             "IntervalSeconds": 2,
+             "MaxAttempts": 3,
+             "BackoffRate": 2.0
+           }
+         ],
+         "Next": "SendSuccessEmail",
+         "Catch": [
+           {
+             "ErrorEquals": ["States.ALL"],
+             "ResultPath": "$.error",
+             "Next": "UpdateJobFailed"
+           }
+         ]
+       },
+       
+       "SendSuccessEmail": {
+         "Type": "Task",
+         "Comment": "Send success email with report",
+         "Resource": "${EmailSenderLambdaArn}",
+         "Retry": [
+           {
+             "ErrorEquals": [
+               "Lambda.ServiceException",
+               "Lambda.AWSLambdaException",
+               "Lambda.SdkClientException"
+             ],
+             "IntervalSeconds": 2,
+             "MaxAttempts": 2,
+             "BackoffRate": 2.0
+           }
+         ],
+         "Next": "UpdateJobSuccess",
+         "Catch": [
+           {
+             "ErrorEquals": ["States.ALL"],
+             "ResultPath": "$.error",
+             "Next": "UpdateJobFailed"
+           }
+         ]
+       },
+       
+       "UpdateJobSuccess": {
+         "Type": "Task",
+         "Comment": "Update job status to SUCCESS",
+         "Resource": "arn:aws:states:::dynamodb:updateItem",
+         "Parameters": {
+           "TableName": "${JobsTableName}",
+           "Key": {
+             "job_id": {
+               "S.$": "$.jobId"
+             }
+           },
+           "UpdateExpression": "SET #status = :status, #stage = :stage, #completed = :completed, #gain = :gain, #tax = :tax",
+           "ExpressionAttributeNames": {
+             "#status": "status",
+             "#stage": "stage",
+             "#completed": "completed_time",
+             "#gain": "total_gain_pln",
+             "#tax": "total_tax_pln"
+           },
+           "ExpressionAttributeValues": {
+             ":status": {
+               "S": "SUCCESS"
+             },
+             ":stage": {
+               "S": "COMPLETED"
+             },
+             ":completed": {
+               "S.$": "$$.State.EnteredTime"
+             },
+             ":gain": {
+               "N.$": "States.Format('{}', $.totalGainPLN)"
+             },
+             ":tax": {
+               "N.$": "States.Format('{}', $.totalTaxPLN)"
+             }
+           }
+         },
+         "End": true
+       },
+       
+       "UpdateJobFailed": {
+         "Type": "Task",
+         "Comment": "Update job status to FAILED",
+         "Resource": "arn:aws:states:::dynamodb:updateItem",
+         "Parameters": {
+           "TableName": "${JobsTableName}",
+           "Key": {
+             "job_id": {
+               "S.$": "$.jobId"
+             }
+           },
+           "UpdateExpression": "SET #status = :status, #stage = :stage, #error = :error",
+           "ExpressionAttributeNames": {
+             "#status": "status",
+             "#stage": "stage",
+             "#error": "error_message"
+           },
+           "ExpressionAttributeValues": {
+             ":status": {
+               "S": "FAILED"
+             },
+             ":stage": {
+               "S.$": "$.stage"
+             },
+             ":error": {
+               "S.$": "$.errorMessage"
+             }
+           }
+         },
+         "End": true
+       },
+       
+       "HandleMetadataError": {
+         "Type": "Pass",
+         "Comment": "Cannot send email without extracting metadata",
+         "Result": {
+           "error": "Failed to extract metadata"
+         },
+         "End": true
+       }
+     }
+   }
+   ```
+
+2. **Update CDK Stack to Include State Machine**
+
+   Add to `infrastructure/cdk/lib/investtax-stack.ts`:
+   ```typescript
+   // Read state machine definition
+   const stateMachineDefinition = fs.readFileSync(
+     path.join(__dirname, '../../step-functions/workflow-definition.json'),
+     'utf-8'
+   );
+   
+   // Replace placeholders with actual ARNs
+   const definitionWithArns = stateMachineDefinition
+     .replace('${JobsTableName}', jobsTable.tableName)
+     .replace(/\${ValidatorLambdaArn}/g, validatorLambda.functionArn)
+     .replace(/\${NormalizerLambdaArn}/g, normalizerLambda.functionArn)
+     .replace(/\${NBPClientLambdaArn}/g, nbpClientLambda.functionArn)
+     .replace(/\${CalculatorLambdaArn}/g, calculatorLambda.functionArn)
+     .replace(/\${ReportGeneratorLambdaArn}/g, reportGeneratorLambda.functionArn)
+     .replace(/\${EmailSenderLambdaArn}/g, emailSenderLambda.functionArn);
+   
+   // Create state machine
+   const stateMachine = new sfn.StateMachine(this, 'ProcessingWorkflow', {
+     stateMachineName: `InvestTax-Workflow-${props.stage}`,
+     definitionBody: sfn.DefinitionBody.fromString(definitionWithArns),
+     timeout: cdk.Duration.minutes(15),
+     logs: {
+       destination: new logs.LogGroup(this, 'StateMachineLogGroup', {
+         logGroupName: `/aws/vendedlogs/states/investtax-workflow-${props.stage}`,
+         retention: logs.RetentionDays.ONE_MONTH,
+         removalPolicy: cdk.RemovalPolicy.DESTROY
+       }),
+       level: sfn.LogLevel.ALL
+     },
+     tracingEnabled: true
+   });
+   
+   // Grant permissions
+   jobsTable.grantReadWriteData(stateMachine);
+   validatorLambda.grantInvoke(stateMachine);
+   normalizerLambda.grantInvoke(stateMachine);
+   nbpClientLambda.grantInvoke(stateMachine);
+   calculatorLambda.grantInvoke(stateMachine);
+   reportGeneratorLambda.grantInvoke(stateMachine);
+   emailSenderLambda.grantInvoke(stateMachine);
+   ```
+
+3. **Create State Machine Starter Lambda (Triggered by S3)**
+
+   Create `infrastructure/step-functions/starter-lambda.ts`:
+   ```typescript
+   import { S3Event } from 'aws-lambda';
+   import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
+   import { S3Client, HeadObjectCommand } from '@aws-sdk/client-s3';
+   
+   const sfnClient = new SFNClient({});
+   const s3Client = new S3Client({});
+   const stateMachineArn = process.env.STATE_MACHINE_ARN!;
+   
+   export const handler = async (event: S3Event) => {
+     for (const record of event.Records) {
+       const bucket = record.s3.bucket.name;
+       const key = decodeURIComponent(record.s3.object.key.replace(/\+/g, ' '));
+       
+       // Extract job ID from filename
+       const jobId = key.split('/').pop()!.replace('.csv', '');
+       
+       // Get email from S3 object metadata
+       const headResponse = await s3Client.send(new HeadObjectCommand({
+         Bucket: bucket,
+         Key: key
+       }));
+       
+       const email = headResponse.Metadata?.['email'] || '';
+       const year = parseInt(key.split('/')[0]) || new Date().getFullYear();
+       
+       if (!email) {
+         console.error(`No email metadata found for object: ${key}`);
+         continue;
+       }
+       
+       // Start Step Functions execution
+       const input = {
+         jobId,
+         email,
+         fileKey: key,
+         year,
+         bucket
+       };
+       
+       const command = new StartExecutionCommand({
+         stateMachineArn,
+         name: `execution-${jobId}`,
+         input: JSON.stringify(input)
+       });
+       
+       try {
+         const response = await sfnClient.send(command);
+         console.log(`Started execution: ${response.executionArn}`);
+       } catch (error) {
+         console.error(`Failed to start execution: ${error}`);
+         throw error;
+       }
+     }
+   };
+   ```
+
+4. **Deploy State Machine**
+   ```bash
+   cd infrastructure/cdk
+   npm run build
+   npx cdk synth -c stage=dev
+   npx cdk deploy -c stage=dev
+   ```
+
+5. **Test State Machine Execution**
+   ```bash
+   # Create test input
+   cat > test-input.json <<EOF
+   {
+     "jobId": "test-123",
+     "email": "test@example.com",
+     "fileKey": "2024/test-123.csv",
+     "year": 2024,
+     "bucket": "investtax-upload-dev"
+   }
+   EOF
+   
+   # Start execution
+   aws stepfunctions start-execution \
+     --state-machine-arn <state-machine-arn> \
+     --name test-execution-1 \
+     --input file://test-input.json
+   
+   # Check execution status
+   aws stepfunctions describe-execution \
+     --execution-arn <execution-arn>
+   ```
+
+#### Expected Output
+```
+State Machine Created:
+Name: InvestTax-Workflow-dev
+Type: STANDARD
+Timeout: 15 minutes
+States: 15
+Transitions: 20+
+
+Visual Workflow:
+ExtractMetadata → ValidateCSV → CheckValidation → NormalizeData →
+FetchRates → CheckRates → CalculateTax → GenerateReport →
+SendEmail → UpdateJobSuccess
+
+Error Paths:
+ValidateCSV (FAIL) → SendValidationErrorEmail → UpdateJobFailed
+FetchRates (FAIL) → SendRateErrorEmail → UpdateJobFailed
+Any (ERROR) → UpdateJobFailed
+```
+
+#### Success Criteria
+- [ ] State machine definition valid JSON
+- [ ] All Lambda ARNs correctly substituted
+- [ ] DynamoDB table name substituted
+- [ ] State machine deploys successfully
+- [ ] CloudWatch logging configured
+- [ ] X-Ray tracing enabled
+- [ ] Test execution completes successfully
+- [ ] Error paths trigger correctly
+
+#### Troubleshooting
+- **Invalid state machine definition**: Validate JSON with ASL validator
+- **Permission errors**: Check IAM role has InvokeFunction permissions
+- **Timeout errors**: Increase individual Lambda timeouts or state machine timeout
+- **Execution not starting**: Check S3 event trigger configuration
+
+---
+
+### Step 13: S3 Event Trigger Integration
+
+**Duration**: 2-3 hours  
+**Dependencies**: Step 12  
+**Prerequisites**: State machine deployed, S3 buckets created
+
+#### Objective
+Configure S3 bucket to trigger Step Functions workflow when CSV files are uploaded.
+
+#### Technology Stack
+- **Event Source**: Amazon S3 ObjectCreated events
+- **Event Router**: Amazon EventBridge
+- **Target**: AWS Step Functions state machine
+
+#### Actions
+
+1. **Enable EventBridge Notifications on S3 Bucket**
+
+   Add to CDK stack:
+   ```typescript
+   // Enable EventBridge notifications
+   uploadBucket.enableEventBridgeNotification();
+   ```
+
+2. **Create EventBridge Rule**
+
+   Add to CDK stack:
+   ```typescript
+   import * as events from 'aws-cdk-lib/aws-events';
+   import * as targets from 'aws-cdk-lib/aws-events-targets';
+   
+   const s3UploadRule = new events.Rule(this, 'S3UploadRule', {
+     ruleName: `investtax-s3-upload-${props.stage}`,
+     eventPattern: {
+       source: ['aws.s3'],
+       detailType: ['Object Created'],
+       detail: {
+         bucket: { name: [uploadBucket.bucketName] },
+         object: { key: [{ suffix: '.csv' }] }
+       }
+     }
+   });
+   
+   s3UploadRule.addTarget(new targets.SfnStateMachine(stateMachine));
+   ```
+
+3. **Test Event Trigger**
+
+   Create test script `scripts/test-upload.ps1`:
+   ```powershell
+   param(
+       [string]$BucketName = "investtax-upload-dev",
+       [string]$Email = "test@example.com"
+   )
+   
+   $year = Get-Date -Format "yyyy"
+   $jobId = [guid]::NewGuid().ToString()
+   $key = "$year/$jobId.csv"
+   
+   aws s3 cp "test-data/sample.csv" "s3://$BucketName/$key" `
+       --metadata "email=$Email" `
+       --region eu-central-1
+   
+   Write-Host "Upload complete. Job ID: $jobId"
+   ```
+
+#### Success Criteria
+- [ ] EventBridge notifications enabled on S3
+- [ ] EventBridge rule filters CSV files
+- [ ] State machine triggered on upload
+- [ ] Test upload starts workflow
+
+#### Troubleshooting
+- **State machine not triggered**: Check EventBridge rule pattern
+- **Missing email**: Verify metadata attached during upload
+
+---
+
+### Step 14: End-to-End Integration Testing
+
+**Duration**: 3-4 hours  
+**Dependencies**: Step 13  
+**Prerequisites**: Complete workflow deployed
+
+#### Objective
+Perform comprehensive end-to-end testing with various scenarios.
+
+#### Technology Stack
+- **Testing**: Manual testing with documented test cases
+- **Monitoring**: CloudWatch Logs, Step Functions console
+
+#### Actions
+
+1. **Create Test Data Set**
+
+   Create test cases:
+   - **Test Case 1**: Simple success (2 transactions)
+   - **Test Case 2**: Multiple stocks (4+ transactions)
+   - **Test Case 3**: Partial fills (FIFO with partials)
+   - **Test Case 4**: Validation error (missing ISIN)
+   - **Test Case 5**: Validation error (invalid date)
+
+2. **Create Test Execution Script**
+
+   Create `scripts/run-integration-tests.ps1`:
+   ```powershell
+   $testCases = @(
+       @{Name="Simple Success"; File="test-1.csv"; ShouldSucceed=$true},
+       @{Name="Validation Error"; File="test-4.csv"; ShouldSucceed=$false}
+   )
+   
+   foreach ($testCase in $testCases) {
+       $jobId = [guid]::NewGuid().ToString()
+       $key = "2024/$jobId.csv"
+       
+       aws s3 cp "test-data/$($testCase.File)" "s3://$BucketName/$key" `
+           --metadata "email=$Email"
+       
+       Write-Host "Test: $($testCase.Name) - Job ID: $jobId"
+       Start-Sleep -Seconds 60
+   }
+   ```
+
+3. **Create Test Checklist**
+
+   Document in `test-data/TEST-CHECKLIST.md`:
+   - Pre-test setup verification
+   - Test case execution steps
+   - Expected outcomes
+   - CloudWatch logs verification
+   - Performance benchmarks
+
+#### Success Criteria
+- [ ] All success cases complete end-to-end
+- [ ] Tax calculations match expected values
+- [ ] Error cases fail gracefully with emails
+- [ ] Performance < 5 minutes for typical files
+
+---
+
+### Step 15: Unit Test Implementation
+
+**Duration**: 4-5 hours  
+**Dependencies**: Steps 6-11  
+**Prerequisites**: All Lambda functions implemented
+
+#### Objective
+Implement comprehensive unit tests with 80% code coverage.
+
+#### Technology Stack
+- **Test Framework**: xUnit 2.9.x
+- **Mocking**: Moq 4.20.x
+- **Coverage**: Coverlet 6.x
+- **Assertions**: FluentAssertions 6.12.x
+
+#### Actions
+
+1. **Add Test Dependencies**
+   ```bash
+   cd tests/InvestTax.Core.Tests
+   dotnet add package xUnit --version 2.9.0
+   dotnet add package Moq --version 4.20.70
+   dotnet add package FluentAssertions --version 6.12.0
+   dotnet add package coverlet.collector --version 6.0.2
+   ```
+
+2. **Create FIFO Calculator Tests**
+
+   Create `tests/InvestTax.Core.Tests/Services/TaxCalculatorServiceTests.cs`:
+   ```csharp
+   public class TaxCalculatorServiceTests
+   {
+       [Fact]
+       public void CalculateTax_SimpleBuyAndSell_CalculatesCorrectGain()
+       {
+           // Test implementation
+       }
+       
+       [Fact]
+       public void CalculateTax_PartialFill_MatchesCorrectly()
+       {
+           // Test implementation
+       }
+       
+       [Fact]
+       public void CalculateTax_SellWithoutBuy_ThrowsException()
+       {
+           // Test implementation
+       }
+   }
+   ```
+
+3. **Create Validation Tests**
+
+   Create validator tests for CSV validation logic.
+
+4. **Run Tests with Coverage**
+   ```bash
+   dotnet test /p:CollectCoverage=true /p:CoverletOutputFormat=opencover
+   ```
+
+#### Success Criteria
+- [ ] All unit tests pass
+- [ ] Code coverage >= 80%
+- [ ] Core business logic >= 90% coverage
+- [ ] Tests run in < 30 seconds
+
+---
+
+### Step 16: Integration Test Scenarios
+
+**Duration**: 2-3 hours  
+**Dependencies**: Step 15  
+**Prerequisites**: Unit tests complete
+
+#### Objective
+Create reusable integration test scenarios and test data.
+
+#### Actions
+
+1. **Create Test Data Generator**
+
+   Create `scripts/generate-test-data.ps1`:
+   ```powershell
+   function Generate-TestCase {
+       param($Name, $Transactions, $ExpectedGain)
+       
+       # Generate CSV file
+       $csv = @"
+   Action|Time|ISIN|Ticker|Name|No. of shares|Price / share|Currency symbol|Exchange rate|Result|Total|Notes
+   "@
+       
+       foreach ($tx in $Transactions) {
+           $csv += "`n$tx"
+       }
+       
+       $csv | Out-File "test-data/$Name.csv" -Encoding UTF8
+       
+       # Generate expected output
+       @{
+           Name = $Name
+           ExpectedGain = $ExpectedGain
+       } | ConvertTo-Json | Out-File "test-data/$Name.expected.json"
+   }
+   ```
+
+2. **Document Test Scenarios**
+
+   Create `test-data/SCENARIOS.md` documenting:
+   - Test purpose
+   - Input data
+   - Expected outputs
+   - Edge cases covered
+
+#### Success Criteria
+- [ ] 10+ test scenarios documented
+- [ ] Test data generator script created
+- [ ] Expected outputs documented
+
+---
+
+### Step 17: Test Data Generation
+
+**Duration**: 2 hours  
+**Dependencies**: Step 16  
+**Prerequisites**: Test scenarios defined
+
+#### Objective
+Generate comprehensive test data covering all edge cases.
+
+#### Actions
+
+1. **Generate Standard Test Files**
+   ```powershell
+   .\\scripts\\generate-test-data.ps1 -Scenarios All
+   ```
+
+2. **Create Edge Case Tests**
+   - Year boundaries
+   - Multiple currencies
+   - Large files (10,000+ transactions)
+   - Weekend/holiday dates for NBP
+
+3. **Validate Test Data**
+   ```powershell
+   .\\scripts\\validate-test-data.ps1
+   ```
+
+#### Success Criteria
+- [ ] 20+ test CSV files generated
+- [ ] Edge cases covered
+- [ ] All files pass validation
+
+---
+
+### Step 18: GitHub Actions Build Pipeline
+
+**Duration**: 3-4 hours  
+**Dependencies**: Step 15  
+**Prerequisites**: Tests implemented
+
+#### Objective
+Create CI/CD pipeline for automated builds and tests.
+
+#### Technology Stack
+- **CI/CD**: GitHub Actions
+- **.NET SDK**: 10.x
+- **Node.js**: 20.x (for CDK)
+
+#### Actions
+
+1. **Create Workflow File**
+
+   Create `.github/workflows/build.yml`:
+   ```yaml
+   name: Build and Test
+   
+   on:
+     push:
+       branches: [ main, develop ]
+     pull_request:
+       branches: [ main ]
+   
+   jobs:
+     build:
+       runs-on: ubuntu-latest
+       
+       steps:
+       - uses: actions/checkout@v4
+       
+       - name: Setup .NET
+         uses: actions/setup-dotnet@v4
+         with:
+           dotnet-version: '10.0.x'
+       
+       - name: Restore dependencies
+         run: dotnet restore
+       
+       - name: Build
+         run: dotnet build --no-restore --configuration Release
+       
+       - name: Test
+         run: dotnet test --no-build --configuration Release /p:CollectCoverage=true
+       
+       - name: Upload coverage
+         uses: codecov/codecov-action@v3
+         with:
+           files: ./tests/**/coverage.opencover.xml
+   
+     cdk-synth:
+       runs-on: ubuntu-latest
+       
+       steps:
+       - uses: actions/checkout@v4
+       
+       - name: Setup Node.js
+         uses: actions/setup-node@v4
+         with:
+           node-version: '20'
+       
+       - name: Install CDK dependencies
+         working-directory: infrastructure/cdk
+         run: npm ci
+       
+       - name: CDK Synth
+         working-directory: infrastructure/cdk
+         run: npx cdk synth -c stage=dev
+   ```
+
+2. **Test Workflow Locally**
+   ```bash
+   # Install act for local testing
+   gh act push
+   ```
+
+#### Success Criteria
+- [ ] Workflow runs on push/PR
+- [ ] All tests pass in CI
+- [ ] Code coverage reported
+- [ ] CDK synthesizes successfully
+
+---
+
+### Step 19: Deployment Scripts and Runbooks
+
+**Duration**: 3 hours  
+**Dependencies**: Step 18  
+**Prerequisites**: CI/CD pipeline working
+
+#### Objective
+Create deployment automation and operational documentation.
+
+#### Actions
+
+1. **Create Deployment Script**
+
+   Create `scripts/deploy.ps1`:
+   ```powershell
+   param(
+       [Parameter(Mandatory=$true)]
+       [ValidateSet("dev", "staging", "prod")]
+       [string]$Stage,
+       
+       [switch]$SkipTests
+   )
+   
+   Write-Host "═══════════════════════════════════════" -ForegroundColor Cyan
+   Write-Host " InvestTax Calculator Deployment" -ForegroundColor Cyan
+   Write-Host " Stage: $Stage" -ForegroundColor Cyan
+   Write-Host "═══════════════════════════════════════" -ForegroundColor Cyan
+   
+   # Run tests
+   if (-not $SkipTests) {
+       Write-Host "`n[1/5] Running tests..." -ForegroundColor Yellow
+       dotnet test --configuration Release
+       if ($LASTEXITCODE -ne 0) {
+           Write-Host "Tests failed!" -ForegroundColor Red
+           exit 1
+       }
+   }
+   
+   # Build Lambdas
+   Write-Host "`n[2/5] Building Lambda functions..." -ForegroundColor Yellow
+   $lambdas = @(
+       "InvestTax.Lambda.Validator",
+       "InvestTax.Lambda.Normalizer",
+       "InvestTax.Lambda.NBPClient",
+       "InvestTax.Lambda.Calculator",
+       "InvestTax.Lambda.ReportGenerator",
+       "InvestTax.Lambda.EmailSender"
+   )
+   
+   foreach ($lambda in $lambdas) {
+       Write-Host "  Building $lambda..."
+       dotnet publish "src/$lambda" -c Release -o "src/$lambda/publish"
+   }
+   
+   # Deploy CDK
+   Write-Host "`n[3/5] Deploying CDK stack..." -ForegroundColor Yellow
+   cd infrastructure/cdk
+   npm ci
+   npx cdk deploy -c stage=$Stage --require-approval never
+   cd ../..
+   
+   # Verify deployment
+   Write-Host "`n[4/5] Verifying deployment..." -ForegroundColor Yellow
+   $stateMachineArn = aws cloudformation describe-stacks `
+       --stack-name "InvestTaxStack-$Stage" `
+       --query "Stacks[0].Outputs[?OutputKey=='StateMachineArn'].OutputValue" `
+       --output text
+   
+   Write-Host "State Machine ARN: $stateMachineArn"
+   
+   # Run smoke test
+   Write-Host "`n[5/5] Running smoke test..." -ForegroundColor Yellow
+   .\\scripts\\smoke-test.ps1 -Stage $Stage
+   
+   Write-Host "`n✓ Deployment complete!" -ForegroundColor Green
+   ```
+
+2. **Create Rollback Script**
+
+   Create `scripts/rollback.ps1`:
+   ```powershell
+   param(
+       [Parameter(Mandatory=$true)]
+       [string]$Stage,
+       
+       [Parameter(Mandatory=$true)]
+       [string]$PreviousVersion
+   )
+   
+   Write-Host "Rolling back to version: $PreviousVersion" -ForegroundColor Yellow
+   
+   cd infrastructure/cdk
+   git checkout $PreviousVersion
+   npx cdk deploy -c stage=$Stage --require-approval never
+   ```
+
+3. **Create Operational Runbook**
+
+   Create `docs/RUNBOOK.md`:
+   ```markdown
+   # InvestTax Calculator - Operational Runbook
+   
+   ## Deployment
+   
+   ### Prerequisites
+   - AWS CLI configured
+   - .NET 10 SDK installed
+   - Node.js 20 installed
+   - IAM permissions for CloudFormation, Lambda, S3, DynamoDB, SES, Step Functions
+   
+   ### Deployment Steps
+   
+   1. Deploy to dev:
+      ```powershell
+      .\\scripts\\deploy.ps1 -Stage dev
+      ```
+   
+   2. Deploy to prod:
+      ```powershell
+      .\\scripts\\deploy.ps1 -Stage prod
+      ```
+   
+   ## Monitoring
+   
+   ### Key Metrics
+   - Step Functions execution success rate
+   - Lambda error rates
+   - Email delivery rate
+   - Average processing time
+   
+   ### CloudWatch Dashboards
+   - View: https://console.aws.amazon.com/cloudwatch/home?region=eu-central-1#dashboards
+   
+   ## Troubleshooting
+   
+   ### Issue: Workflow not triggered
+   **Symptoms**: File uploaded but no Step Functions execution
+   **Diagnosis**:
+   ```powershell
+   aws events list-rules --name-prefix investtax
+   ```
+   **Resolution**: Check EventBridge rule is enabled
+   
+   ### Issue: NBP API timeout
+   **Symptoms**: Rate fetch stage fails
+   **Diagnosis**: Check CloudWatch logs for NBP Client Lambda
+   **Resolution**: Increase Lambda timeout, check NBP API status
+   
+   ### Issue: Email not delivered
+   **Symptoms**: Workflow completes but no email
+   **Diagnosis**:
+   ```powershell
+   aws ses get-send-statistics
+   ```
+   **Resolution**: Verify SES sending limits, check bounce rate
+   
+   ## Rollback Procedure
+   
+   1. Identify previous stable version:
+      ```powershell
+      git log --oneline
+      ```
+   
+   2. Execute rollback:
+      ```powershell
+      .\\scripts\\rollback.ps1 -Stage prod -PreviousVersion <commit-hash>
+      ```
+   
+   3. Verify:
+      ```powershell
+      .\\scripts\\smoke-test.ps1 -Stage prod
+      ```
+   ```
+
+#### Success Criteria
+- [ ] Deployment script automates full deployment
+- [ ] Rollback script implemented and tested
+- [ ] Runbook covers common scenarios
+- [ ] Smoke tests verify deployment
+
+---
+
+### Step 20: User Documentation and Handoff
+
+**Duration**: 4 hours  
+**Dependencies**: Step 19  
+**Prerequisites**: System fully operational
+
+#### Objective
+Create user documentation and complete project handoff.
+
+#### Actions
+
+1. **Create User Guide**
+
+   Create `docs/USER-GUIDE.md`:
+   ```markdown
+   # InvestTax Calculator - User Guide
+   
+   ## Overview
+   
+   InvestTax Calculator is an automated system for calculating capital gains taxes on Polish stock transactions using the FIFO (First-In, First-Out) method.
+   
+   ## How to Use
+   
+   ### Step 1: Prepare Your CSV File
+   
+   Create a pipe-delimited CSV file with the following columns:
+   
+   ```
+   Action|Time|ISIN|Ticker|Name|No. of shares|Price / share|Currency symbol|Exchange rate|Result|Total|Notes
+   ```
+   
+   **Requirements**:
+   - Use pipe (|) as delimiter
+   - Include all transactions for a single tax year
+   - Dates in ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ)
+   - All transactions must be "Market buy" or "Market sell"
+   
+   **Example**:
+   ```csv
+   Action|Time|ISIN|Ticker|Name|No. of shares|Price / share|Currency symbol|Exchange rate|Result|Total|Notes
+   Market buy|2024-01-15T10:00:00Z|US0378331005|AAPL|Apple Inc.|10|150.00|USD|3.95|1500.00|5925.00|
+   Market sell|2024-06-20T14:00:00Z|US0378331005|AAPL|Apple Inc.|10|170.00|USD|4.05|1700.00|6885.00|
+   ```
+   
+   ### Step 2: Upload to S3
+   
+   Upload your CSV file to the S3 bucket with your email in metadata:
+   
+   ```powershell
+   aws s3 cp your-file.csv s3://investtax-upload-prod/2024/your-unique-id.csv `
+       --metadata "email=your-email@example.com"
+   ```
+   
+   ### Step 3: Wait for Email
+   
+   You will receive an email within 5 minutes containing:
+   - Total capital gain (PLN)
+   - Total tax owed (19%)
+   - Detailed transaction breakdown
+   - FIFO matching details
+   
+   ## Understanding Your Report
+   
+   ### Summary Section
+   - **Total Capital Gain**: Total profit in PLN
+   - **Tax Rate**: 19% flat rate (Polish law)
+   - **Total Tax Owed**: Amount to report on PIT-38
+   
+   ### Transaction Details
+   Each matched buy-sell pair shows:
+   - Buy date, shares, price (original currency + PLN)
+   - Sell date, shares, price (original currency + PLN)
+   - Gain/loss for that specific match
+   
+   ### Methodology
+   - **FIFO**: First shares bought are first shares sold
+   - **Exchange Rates**: NBP (National Bank of Poland) official rates
+   - **Rounding**: All PLN amounts rounded to 2 decimals
+   
+   ## Troubleshooting
+   
+   ### Error: "Email metadata not found"
+   **Solution**: Include --metadata "email=your@email.com" when uploading
+   
+   ### Error: "Invalid date format"
+   **Solution**: Use ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ
+   
+   ### Error: "Missing required column"
+   **Solution**: Ensure all 12 columns are present with exact names
+   
+   ## Important Disclaimers
+   
+   - This is NOT official tax advice
+   - You must verify all calculations
+   - Consult a tax professional before filing
+   - You are responsible for accuracy
+   ```
+
+2. **Create API Documentation**
+
+   Generate XML documentation comments in all public classes and methods.
+
+3. **Create Handoff Checklist**
+
+   Create `docs/HANDOFF-CHECKLIST.md`:
+   ```markdown
+   # Project Handoff Checklist
+   
+   ## Code & Infrastructure
+   - [ ] All source code committed to repository
+   - [ ] CDK infrastructure code complete
+   - [ ] All Lambda functions implemented
+   - [ ] Step Functions state machine deployed
+   - [ ] Unit tests achieve 80%+ coverage
+   - [ ] Integration tests documented
+   
+   ## Deployment
+   - [ ] Dev environment deployed and tested
+   - [ ] Prod environment deployed
+   - [ ] CI/CD pipeline operational
+   - [ ] Deployment scripts tested
+   - [ ] Rollback procedure documented
+   
+   ## Documentation
+   - [ ] User Guide complete
+   - [ ] Implementation Plan finalized
+   - [ ] Operational Runbook created
+   - [ ] Architecture diagrams up-to-date
+   - [ ] API documentation generated
+   - [ ] Test scenarios documented
+   
+   ## AWS Resources
+   - [ ] S3 buckets created and configured
+   - [ ] DynamoDB tables created
+   - [ ] Lambda functions deployed
+   - [ ] Step Functions state machine operational
+   - [ ] EventBridge rules configured
+   - [ ] SES email verified
+   - [ ] CloudWatch dashboards created
+   - [ ] IAM roles properly scoped
+   
+   ## Testing
+   - [ ] Unit tests pass (80%+ coverage)
+   - [ ] Integration tests pass
+   - [ ] End-to-end tests successful
+   - [ ] Load testing completed (if applicable)
+   - [ ] Error scenarios tested
+   
+   ## Monitoring & Operations
+   - [ ] CloudWatch alarms configured
+   - [ ] Logging properly configured
+   - [ ] Metrics collected
+   - [ ] Troubleshooting guide complete
+   
+   ## Security
+   - [ ] No secrets in source code
+   - [ ] IAM roles follow least privilege
+   - [ ] S3 buckets not publicly accessible
+   - [ ] Encryption at rest enabled
+   - [ ] Encryption in transit enforced
+   
+   ## Cost Management
+   - [ ] Budget alerts configured
+   - [ ] Resource tagging implemented
+   - [ ] Cost optimization reviewed
+   
+   ## Knowledge Transfer
+   - [ ] Team walkthrough completed
+   - [ ] Q&A session conducted
+   - [ ] Support contacts documented
+   ```
+
+4. **Prepare Demo**
+
+   Create demo script for stakeholder presentation:
+   - Live upload demonstration
+   - CloudWatch logs walkthrough
+   - Step Functions execution visualization
+   - Email receipt demonstration
+
+#### Success Criteria
+- [ ] User guide covers all scenarios
+- [ ] Handoff checklist 100% complete
+- [ ] Demo successfully presented
+- [ ] All documentation reviewed and approved
+- [ ] Team trained on system operation
 
 ---
 
 ## Testing Strategy
-
-### Unit Testing Approach
 
 **Framework**: xUnit 2.6.x  
 **Mocking**: Moq 4.20.x  

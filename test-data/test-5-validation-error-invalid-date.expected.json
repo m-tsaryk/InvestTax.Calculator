@@ -1,0 +1,16 @@
+{
+  "testName": "test-5-validation-error-invalid-date",
+  "description": "CSV file with invalid date format",
+  "shouldSucceed": false,
+  "expectedOutcome": {
+    "validationErrors": [
+      {
+        "row": 2,
+        "column": "Time",
+        "message": "Invalid date format"
+      }
+    ],
+    "jobStatus": "Failed",
+    "errorEmailSent": true
+  }
+}

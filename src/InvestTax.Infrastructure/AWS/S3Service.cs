@@ -116,4 +116,39 @@ public class S3Service : IS3Service
         var response = await _s3Client.GetObjectMetadataAsync(request, cancellationToken);
         return response.Metadata.Keys.ToDictionary(k => k, k => response.Metadata[k]);
     }
+
+    /// <summary>
+    /// Downloads an S3 object to a local file
+    /// </summary>
+    public async Task DownloadFileAsync(string bucketName, string key, string localPath, CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Downloading s3://{Bucket}/{Key} to {LocalPath}", bucketName, key, localPath);
+        
+        var request = new GetObjectRequest
+        {
+            BucketName = bucketName,
+            Key = key
+        };
+
+        using var response = await _s3Client.GetObjectAsync(request, cancellationToken);
+        await response.WriteResponseStreamToFileAsync(localPath, append: false, cancellationToken);
+    }
+
+    /// <summary>
+    /// Uploads a local file to S3
+    /// </summary>
+    public async Task UploadFileAsync(string bucketName, string key, string localPath, CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Uploading {LocalPath} to s3://{Bucket}/{Key}", localPath, bucketName, key);
+        
+        using var fileStream = File.OpenRead(localPath);
+        var request = new PutObjectRequest
+        {
+            BucketName = bucketName,
+            Key = key,
+            InputStream = fileStream
+        };
+
+        await _s3Client.PutObjectAsync(request, cancellationToken);
+    }
 }

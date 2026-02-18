@@ -10,7 +10,9 @@ This folder contains PowerShell scripts to manage the local development environm
 
 ## Scripts
 
-### start-local.ps1
+### Development Environment Scripts
+
+#### start-local.ps1
 
 Starts the LocalStack environment and initializes AWS resources.
 
@@ -31,7 +33,7 @@ Starts the LocalStack environment and initializes AWS resources.
 .\scripts\start-local.ps1 -SkipInit
 ```
 
-### stop-local.ps1
+#### stop-local.ps1
 
 Stops the LocalStack environment.
 
@@ -52,9 +54,76 @@ Stops the LocalStack environment.
 .\scripts\stop-local.ps1 -RemoveVolumes
 ```
 
-### check-local.ps1
+#### check-local.ps1
 
 Checks the status of the local development environment.
+
+**Usage:**
+```powershell
+.\scripts\check-local.ps1
+```
+
+This script displays:
+- Running Docker containers
+- LocalStack service health
+- Available S3 buckets
+- DynamoDB tables
+- Service URLs
+
+### Testing Scripts
+
+#### test-upload.ps1
+
+Uploads a test CSV file to S3 to trigger the InvestTax workflow. This script simulates a user uploading their investment data file.
+
+**Usage:**
+```powershell
+.\scripts\test-upload.ps1
+```
+
+**Options:**
+- `-BucketName` - Target S3 bucket (default: `investtax-upload-dev`)
+- `-Email` - User email address (default: `test@example.com`)
+- `-CsvFile` - Path to CSV file (default: `test-data\sample.csv`)
+- `-Region` - AWS region (default: `eu-central-1`)
+- `-Profile` - AWS CLI profile (optional)
+
+**Examples:**
+```powershell
+# Basic usage with defaults
+.\scripts\test-upload.ps1
+
+# Upload to production bucket
+.\scripts\test-upload.ps1 -BucketName "investtax-upload-prod" -Email "user@example.com"
+
+# Upload custom test file
+.\scripts\test-upload.ps1 -CsvFile "test-data\my-investments.csv" -Email "john@example.com"
+
+# Use specific AWS profile
+.\scripts\test-upload.ps1 -Profile "my-aws-profile"
+```
+
+**What it does:**
+1. Validates the CSV file exists
+2. Generates a unique timestamped filename
+3. Uploads to S3 with format: `email@example.com/filename-timestamp.csv`
+4. Triggers the Starter Lambda function
+5. Displays monitoring information
+
+**Workflow triggered:**
+1. Starter Lambda receives S3 event
+2. Job record created in DynamoDB
+3. Step Functions workflow starts
+4. CSV validation
+5. Data normalization
+6. Exchange rate fetching
+7. Tax calculation
+8. Report generation
+9. Email delivery
+
+#### test-workflow.ps1
+
+Tests the Step Functions workflow directly (bypassing S3 upload).
 
 **Usage:**
 ```powershell

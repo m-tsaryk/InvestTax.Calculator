@@ -1,0 +1,11 @@
+{
+  "testName": "test-2-multiple-stocks",
+  "description": "Multiple stocks (AAPL, MSFT, GOOGL) with various transactions",
+  "shouldSucceed": true,
+  "expectedOutcome": {
+    "totalGainPLN": "calculated at runtime",
+    "totalTaxPLN": "calculated at runtime",
+    "matchedTransactions": 4,
+    "notes": "Tests FIFO across multiple stocks, partial sells, and multiple buys"
+  }
+}

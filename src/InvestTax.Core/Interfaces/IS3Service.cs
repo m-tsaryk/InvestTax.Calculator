@@ -12,4 +12,6 @@ public interface IS3Service
     Task<bool> ObjectExistsAsync(string bucketName, string key, CancellationToken cancellationToken = default);
     Task DeleteObjectAsync(string bucketName, string key, CancellationToken cancellationToken = default);
     Task<Dictionary<string, string>> GetObjectMetadataAsync(string bucketName, string key, CancellationToken cancellationToken = default);
+    Task DownloadFileAsync(string bucketName, string key, string localPath, CancellationToken cancellationToken = default);
+    Task UploadFileAsync(string bucketName, string key, string localPath, CancellationToken cancellationToken = default);
 }

@@ -6,11 +6,15 @@
     "All the command line options for the Lambda command can be specified in this file."
   ],
   "profile": "",
-  "region": "",
+  "region": "eu-central-1",
   "configuration": "Release",
   "function-architecture": "x86_64",
   "function-runtime": "dotnet10",
   "function-memory-size": 512,
-  "function-timeout": 30,
-  "function-handler": "InvestTax.Lambda.Validator::InvestTax.Lambda.Validator.Function::FunctionHandler"
+  "function-timeout": 300,
+  "function-handler": "InvestTax.Lambda.Validator::InvestTax.Lambda.Validator.Function::FunctionHandler",
+  "environment-variables": {
+    "UPLOAD_BUCKET": "investtax-upload-dev",
+    "PROCESSING_BUCKET": "investtax-processing-dev"
+  }
 }
