@@ -21,6 +21,7 @@ aws --endpoint-url=$endpoint s3 mb s3://investtax-processing-local
 # Create DynamoDB table
 Write-Host "`nCreating DynamoDB Jobs table..." -ForegroundColor Cyan
 
+# Create temporary JSON file for GSI
 $gsiJson = @'
 [
   {
@@ -42,6 +43,9 @@ $gsiJson = @'
 ]
 '@
 
+$gsiFile = "$env:TEMP\gsi.json"
+[System.IO.File]::WriteAllText($gsiFile, $gsiJson)
+
 aws --endpoint-url=$endpoint dynamodb create-table `
   --table-name InvestTax-Jobs-Local `
   --attribute-definitions `
@@ -49,9 +53,11 @@ aws --endpoint-url=$endpoint dynamodb create-table `
     AttributeName=Status,AttributeType=S `
   --key-schema `
     AttributeName=JobId,KeyType=HASH `
-  --global-secondary-indexes $gsiJson `
+  --global-secondary-indexes "file://$gsiFile" `
   --billing-mode PAY_PER_REQUEST `
   --region $region
+
+Remove-Item -Path $gsiFile -ErrorAction SilentlyContinue
 
 # Verify SES email
 Write-Host "`nVerifying SES email for testing..." -ForegroundColor Cyan

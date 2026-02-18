@@ -1,0 +1,7 @@
+Action|Time|ISIN|Ticker|Name|No. of shares|Price / share|Currency symbol|Exchange rate|Result|Total|Notes
+Buy|2024-01-05 09:30:00|US88160R1014|TSLA|Tesla Inc.|20|180.00|USD|3.90|3600.00|14040.00|Initial large buy
+Buy|2024-02-10 10:00:00|US88160R1014|TSLA|Tesla Inc.|10|175.00|USD|3.95|1750.00|6912.50|Second buy
+Sell|2024-03-15 11:30:00|US88160R1014|TSLA|Tesla Inc.|15|195.00|USD|4.00|2925.00|11700.00|Partial sell (from first buy)
+Sell|2024-04-20 13:00:00|US88160R1014|TSLA|Tesla Inc.|8|200.00|USD|4.05|1600.00|6480.00|Second partial sell
+Buy|2024-05-25 14:30:00|US88160R1014|TSLA|Tesla Inc.|12|185.00|USD|4.02|2220.00|8924.40|Third buy
+Sell|2024-06-30 15:45:00|US88160R1014|TSLA|Tesla Inc.|10|210.00|USD|4.10|2100.00|8610.00|Third partial sell

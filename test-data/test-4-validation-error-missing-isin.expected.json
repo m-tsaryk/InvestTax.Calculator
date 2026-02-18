@@ -1,0 +1,16 @@
+{
+  "testName": "test-4-validation-error-missing-isin",
+  "description": "CSV file with missing ISIN field",
+  "shouldSucceed": false,
+  "expectedOutcome": {
+    "validationErrors": [
+      {
+        "row": 2,
+        "column": "ISIN",
+        "message": "ISIN is required"
+      }
+    ],
+    "jobStatus": "Failed",
+    "errorEmailSent": true
+  }
+}
