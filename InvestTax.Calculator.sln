@@ -27,6 +27,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "InvestTax.Core.Tests", "tes
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "InvestTax.Lambda.Tests", "tests\InvestTax.Lambda.Tests\InvestTax.Lambda.Tests.csproj", "{A221EA60-1BDC-4F6D-8DF6-CABFFC311C94}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "InvestTax.Lambda.Starter", "src\InvestTax.Lambda.Starter\InvestTax.Lambda.Starter.csproj", "{A46AF94E-88E8-463E-B568-D83216252C55}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -157,6 +159,18 @@ Global
 		{A221EA60-1BDC-4F6D-8DF6-CABFFC311C94}.Release|x64.Build.0 = Release|Any CPU
 		{A221EA60-1BDC-4F6D-8DF6-CABFFC311C94}.Release|x86.ActiveCfg = Release|Any CPU
 		{A221EA60-1BDC-4F6D-8DF6-CABFFC311C94}.Release|x86.Build.0 = Release|Any CPU
+		{A46AF94E-88E8-463E-B568-D83216252C55}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A46AF94E-88E8-463E-B568-D83216252C55}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A46AF94E-88E8-463E-B568-D83216252C55}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{A46AF94E-88E8-463E-B568-D83216252C55}.Debug|x64.Build.0 = Debug|Any CPU
+		{A46AF94E-88E8-463E-B568-D83216252C55}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{A46AF94E-88E8-463E-B568-D83216252C55}.Debug|x86.Build.0 = Debug|Any CPU
+		{A46AF94E-88E8-463E-B568-D83216252C55}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A46AF94E-88E8-463E-B568-D83216252C55}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A46AF94E-88E8-463E-B568-D83216252C55}.Release|x64.ActiveCfg = Release|Any CPU
+		{A46AF94E-88E8-463E-B568-D83216252C55}.Release|x64.Build.0 = Release|Any CPU
+		{A46AF94E-88E8-463E-B568-D83216252C55}.Release|x86.ActiveCfg = Release|Any CPU
+		{A46AF94E-88E8-463E-B568-D83216252C55}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -172,5 +186,6 @@ Global
 		{6F558FC0-690B-411C-8801-8C8478A55031} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{0686FFC3-991D-4680-A850-C1D41A681AED} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{A221EA60-1BDC-4F6D-8DF6-CABFFC311C94} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{A46AF94E-88E8-463E-B568-D83216252C55} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

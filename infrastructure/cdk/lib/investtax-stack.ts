@@ -8,6 +8,8 @@ import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
 import { Construct } from 'constructs';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export interface InvestTaxStackProps extends cdk.StackProps {
   stage: string;
@@ -208,79 +210,28 @@ export class InvestTaxStack extends cdk.Stack {
 
     // ==================== STEP FUNCTIONS STATE MACHINE ====================
     
-    // Define Step Functions tasks
-    const validateTask = new tasks.LambdaInvoke(this, 'ValidateCSV', {
-      lambdaFunction: validatorFunction,
-      outputPath: '$.Payload',
-    });
+    // Load state machine definition from JSON file
+    const stateMachineDefinitionPath = path.join(__dirname, 'state-machine-definition.json');
+    let stateMachineDefinitionString = fs.readFileSync(stateMachineDefinitionPath, 'utf8');
 
-    const normalizeTask = new tasks.LambdaInvoke(this, 'NormalizeData', {
-      lambdaFunction: normalizerFunction,
-      outputPath: '$.Payload',
-    });
+    // Replace placeholders with actual resource names and ARNs
+    stateMachineDefinitionString = stateMachineDefinitionString
+      .replace(/\$\{JOBS_TABLE\}/g, jobsTable.tableName)
+      .replace(/\$\{VALIDATOR_FUNCTION\}/g, validatorFunction.functionArn)
+      .replace(/\$\{NORMALIZER_FUNCTION\}/g, normalizerFunction.functionArn)
+      .replace(/\$\{NBP_CLIENT_FUNCTION\}/g, nbpClientFunction.functionArn)
+      .replace(/\$\{CALCULATOR_FUNCTION\}/g, calculatorFunction.functionArn)
+      .replace(/\$\{REPORT_GENERATOR_FUNCTION\}/g, reportGeneratorFunction.functionArn)
+      .replace(/\$\{EMAIL_SENDER_FUNCTION\}/g, emailSenderFunction.functionArn);
 
-    const fetchRatesTask = new tasks.LambdaInvoke(this, 'FetchNBPRates', {
-      lambdaFunction: nbpClientFunction,
-      outputPath: '$.Payload',
-    });
+    const stateMachineDefinition = JSON.parse(stateMachineDefinitionString);
 
-    const calculateTask = new tasks.LambdaInvoke(this, 'CalculateTax', {
-      lambdaFunction: calculatorFunction,
-      outputPath: '$.Payload',
-    });
-
-    const generateReportTask = new tasks.LambdaInvoke(this, 'GenerateReport', {
-      lambdaFunction: reportGeneratorFunction,
-      outputPath: '$.Payload',
-    });
-
-    const sendEmailTask = new tasks.LambdaInvoke(this, 'SendEmail', {
-      lambdaFunction: emailSenderFunction,
-      outputPath: '$.Payload',
-    });
-
-    // Error handling states
-    const jobFailed = new sfn.Fail(this, 'JobFailed', {
-      cause: 'Job processing failed',
-      error: 'ProcessingError',
-    });
-
-    const jobSucceeded = new sfn.Succeed(this, 'JobSucceeded', {
-      comment: 'Job completed successfully',
-    });
-
-    // Define workflow
-    const definition = validateTask
-      .addCatch(jobFailed, {
-        resultPath: '$.error',
-      })
-      .next(normalizeTask
-        .addCatch(jobFailed, {
-          resultPath: '$.error',
-        }))
-      .next(fetchRatesTask
-        .addCatch(jobFailed, {
-          resultPath: '$.error',
-        }))
-      .next(calculateTask
-        .addCatch(jobFailed, {
-          resultPath: '$.error',
-        }))
-      .next(generateReportTask
-        .addCatch(jobFailed, {
-          resultPath: '$.error',
-        }))
-      .next(sendEmailTask
-        .addCatch(jobFailed, {
-          resultPath: '$.error',
-        }))
-      .next(jobSucceeded);
-
-    // Create state machine
+    // Create state machine with definition from JSON
     const stateMachine = new sfn.StateMachine(this, 'TaxCalculationWorkflow', {
       stateMachineName: `InvestTax-Workflow-${stage}`,
-      definition: definition,
+      definitionBody: sfn.DefinitionBody.fromString(JSON.stringify(stateMachineDefinition)),
       timeout: cdk.Duration.minutes(30),
+      tracingEnabled: true,
       logs: {
         destination: new logs.LogGroup(this, 'StateMachineLogGroup', {
           logGroupName: `/aws/stepfunctions/InvestTax-Workflow-${stage}`,
@@ -288,6 +239,7 @@ export class InvestTaxStack extends cdk.Stack {
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
         level: sfn.LogLevel.ALL,
+        includeExecutionData: true,
       },
     });
 
@@ -299,80 +251,27 @@ export class InvestTaxStack extends cdk.Stack {
     reportGeneratorFunction.grantInvoke(stateMachine);
     emailSenderFunction.grantInvoke(stateMachine);
 
+    // Grant Step Functions permission to update DynamoDB
+    jobsTable.grantReadWriteData(stateMachine);
+
     // ==================== S3 EVENT TRIGGER ====================
     
     // Create Lambda to trigger Step Functions on S3 upload
-    const triggerFunction = new lambda.Function(this, 'TriggerFunction', {
-      functionName: `InvestTax-Trigger-${stage}`,
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: 'index.handler',
-      code: lambda.Code.fromInline(`
-import json
-import boto3
-import os
-
-stepfunctions = boto3.client('stepfunctions')
-dynamodb = boto3.resource('dynamodb')
-
-def handler(event, context):
-    state_machine_arn = os.environ['STATE_MACHINE_ARN']
-    jobs_table_name = os.environ['JOBS_TABLE']
-    
-    for record in event['Records']:
-        bucket = record['s3']['bucket']['name']
-        key = record['s3']['object']['key']
-        
-        # Extract email from S3 object metadata or key
-        # For MVP, assume email is in the key: email@example.com/file.csv
-        parts = key.split('/')
-        if len(parts) != 2:
-            print(f'Invalid S3 key format: {key}')
-            continue
-        
-        email = parts[0]
-        filename = parts[1]
-        
-        # Create job in DynamoDB
-        import uuid
-        job_id = str(uuid.uuid4())
-        
-        table = dynamodb.Table(jobs_table_name)
-        table.put_item(Item={
-            'JobId': job_id,
-            'Email': email,
-            'S3Key': key,
-            'Status': 'Created',
-            'CreatedAt': context.aws_request_id,
-        })
-        
-        # Start Step Functions execution
-        execution_input = {
-            'JobId': job_id,
-            'Email': email,
-            'S3Key': key,
-            'UploadBucket': bucket,
-            'ProcessingBucket': os.environ['PROCESSING_BUCKET'],
-        }
-        
-        response = stepfunctions.start_execution(
-            stateMachineArn=state_machine_arn,
-            name=job_id,
-            input=json.dumps(execution_input)
-        )
-        
-        print(f'Started execution for job {job_id}: {response["executionArn"]}')
-    
-    return {
-        'statusCode': 200,
-        'body': json.dumps('Processing started')
-    }
-      `),
+    const triggerFunction = new lambda.Function(this, 'StarterFunction', {
+      functionName: `InvestTax-Starter-${stage}`,
+      runtime: lambda.Runtime.DOTNET_8,
+      handler: 'InvestTax.Lambda.Starter::InvestTax.Lambda.Starter.Function::FunctionHandler',
+      code: lambda.Code.fromAsset('../../src/InvestTax.Lambda.Starter/bin/Release/net10.0/publish'),
+      role: lambdaExecutionRole,
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
       environment: {
         STATE_MACHINE_ARN: stateMachine.stateMachineArn,
         JOBS_TABLE: jobsTable.tableName,
         PROCESSING_BUCKET: processingBucket.bucketName,
+        STAGE: stage,
       },
-      timeout: cdk.Duration.seconds(30),
+      logRetention: logs.RetentionDays.ONE_WEEK,
     });
 
     // Grant permissions to trigger function
