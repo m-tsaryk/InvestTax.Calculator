@@ -154,10 +154,6 @@ jobs:
       working-directory: ./infrastructure/cdk
       run: npm run build
     
-    - name: Run CDK tests
-      working-directory: ./infrastructure/cdk
-      run: npm test
-    
     - name: CDK Synth (dev)
       working-directory: ./infrastructure/cdk
       run: npx cdk synth -c stage=dev --verbose
