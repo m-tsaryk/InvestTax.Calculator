@@ -23,6 +23,9 @@
     <ProjectReference Include="..\..\src\InvestTax.Core\InvestTax.Core.csproj" />
     <ProjectReference Include="..\..\src\InvestTax.Infrastructure\InvestTax.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\InvestTax.Lambda.Validator\InvestTax.Lambda.Validator.csproj" />
+    <ProjectReference Include="..\..\src\InvestTax.Lambda.EmailSender\InvestTax.Lambda.EmailSender.csproj" />
+    <ProjectReference Include="..\..\src\InvestTax.Lambda.Calculator\InvestTax.Lambda.Calculator.csproj" />
+    <ProjectReference Include="..\..\src\InvestTax.Lambda.ReportGenerator\InvestTax.Lambda.ReportGenerator.csproj" />
   </ItemGroup>
 
 </Project>
