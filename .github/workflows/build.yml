@@ -1,4 +1,4 @@
-﻿name: Build and Test
+name: Build and Test
 
 on:
   push:
@@ -26,13 +26,13 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: `${{ env.DOTNET_VERSION }}
+        dotnet-version: ${{ env.DOTNET_VERSION }}
     
     - name: Cache NuGet packages
       uses: actions/cache@v4
       with:
         path: ~/.nuget/packages
-        key: `${{ runner.os }}-nuget-`${{ hashFiles('**/*.csproj') }}
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
         restore-path: |
           ~/.nuget/packages
     
@@ -112,21 +112,21 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: `${{ env.DOTNET_VERSION }}
+        dotnet-version: ${{ env.DOTNET_VERSION }}
     
-    - name: Build Lambda - `${{ matrix.lambda }}
+    - name: Build Lambda - ${{ matrix.lambda }}
       run: |
-        dotnet publish src/`${{ matrix.lambda }}/`${{ matrix.lambda }}.csproj \
+        dotnet publish src/${{ matrix.lambda }}/${{ matrix.lambda }}.csproj \
           --configuration Release \
           --runtime linux-x64 \
           --self-contained false \
-          --output ./artifacts/`${{ matrix.lambda }}
+          --output ./artifacts/${{ matrix.lambda }}
     
     - name: Upload Lambda artifact
       uses: actions/upload-artifact@v4
       with:
-        name: lambda-`${{ matrix.lambda }}
-        path: ./artifacts/`${{ matrix.lambda }}
+        name: lambda-${{ matrix.lambda }}
+        path: ./artifacts/${{ matrix.lambda }}
         retention-days: 7
 
   # CDK Synthesis and Validation
@@ -142,7 +142,7 @@ jobs:
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: `${{ env.NODE_VERSION }}
+        node-version: ${{ env.NODE_VERSION }}
         cache: 'npm'
         cache-dependency-path: infrastructure/cdk/package-lock.json
     
@@ -181,7 +181,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: `${{ env.DOTNET_VERSION }}
+        dotnet-version: ${{ env.DOTNET_VERSION }}
     
     - name: Restore dependencies
       run: dotnet restore InvestTax.Calculator.sln
@@ -210,19 +210,19 @@ jobs:
     steps:
     - name: Check build status
       run: |
-        echo "## Build Summary :rocket:" >> `$GITHUB_STEP_SUMMARY
-        echo "" >> `$GITHUB_STEP_SUMMARY
-        echo "| Job | Status |" >> `$GITHUB_STEP_SUMMARY
-        echo "|-----|--------|" >> `$GITHUB_STEP_SUMMARY
-        echo "| Build & Test | `${{ needs.build-and-test.result }} |" >> `$GITHUB_STEP_SUMMARY
-        echo "| Build Lambdas | `${{ needs.build-lambdas.result }} |" >> `$GITHUB_STEP_SUMMARY
-        echo "| CDK Synth | `${{ needs.cdk-synth.result }} |" >> `$GITHUB_STEP_SUMMARY
-        echo "| Security Scan | `${{ needs.security-scan.result }} |" >> `$GITHUB_STEP_SUMMARY
-        echo "" >> `$GITHUB_STEP_SUMMARY
+        echo "## Build Summary :rocket:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Build & Test | ${{ needs.build-and-test.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Build Lambdas | ${{ needs.build-lambdas.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| CDK Synth | ${{ needs.cdk-synth.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Security Scan | ${{ needs.security-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
         
-        if [ "`${{ needs.build-and-test.result }}" != "success" ] || \
-           [ "`${{ needs.build-lambdas.result }}" != "success" ] || \
-           [ "`${{ needs.cdk-synth.result }}" != "success" ]; then
+        if [ "${{ needs.build-and-test.result }}" != "success" ] || \
+           [ "${{ needs.build-lambdas.result }}" != "success" ] || \
+           [ "${{ needs.cdk-synth.result }}" != "success" ]; then
           echo "::error::One or more jobs failed. Please review the logs."
           exit 1
         fi
