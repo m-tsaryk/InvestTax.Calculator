@@ -1,3 +1,5 @@
+using InvestTax.Core.Models;
+
 namespace InvestTax.Lambda.Normalizer.Models;
 
 /// <summary>

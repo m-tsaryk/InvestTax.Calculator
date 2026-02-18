@@ -25,6 +25,9 @@ public class LambdaInput
     // Normalizer output
     public string NormalizedFileKey { get; set; } = string.Empty;
     
+    // NBP Rate Fetcher output
+    public string RateMapKey { get; set; } = string.Empty;
+    
     // Calculator output
     public string CalculationResultKey { get; set; } = string.Empty;
     

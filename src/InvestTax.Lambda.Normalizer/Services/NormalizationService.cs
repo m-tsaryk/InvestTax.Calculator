@@ -3,6 +3,7 @@ using System.Text.Json;
 using CsvHelper;
 using CsvHelper.Configuration;
 using InvestTax.Core.Enums;
+using InvestTax.Core.Models;
 using InvestTax.Lambda.Normalizer.Models;
 using Microsoft.Extensions.Logging;
 using NodaTime;

@@ -6,11 +6,14 @@
     "All the command line options for the Lambda command can be specified in this file."
   ],
   "profile": "",
-  "region": "",
+  "region": "eu-central-1",
   "configuration": "Release",
   "function-architecture": "x86_64",
   "function-runtime": "dotnet10",
-  "function-memory-size": 512,
-  "function-timeout": 30,
-  "function-handler": "InvestTax.Lambda.NBPClient::InvestTax.Lambda.NBPClient.Function::FunctionHandler"
+  "function-memory-size": 1024,
+  "function-timeout": 900,
+  "function-handler": "InvestTax.Lambda.NBPClient::InvestTax.Lambda.NBPClient.Function::FunctionHandler",
+  "environment-variables": {
+    "PROCESSING_BUCKET": "investtax-processing-dev"
+  }
 }
