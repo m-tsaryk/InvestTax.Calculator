@@ -74,6 +74,9 @@ Thumbs.db
 ## Test Results
 TestResults/
 coverage/
+*.cobertura.xml
+coverage.*.xml
+*.coverage
 
 ## LocalStack
 localstack-data/
