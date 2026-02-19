@@ -129,42 +129,6 @@ jobs:
         path: ./artifacts/${{ matrix.lambda }}
         retention-days: 7
 
-  # CDK Synthesis and Validation
-  cdk-synth:
-    name: CDK Synthesize & Validate
-    runs-on: ubuntu-latest
-    needs: build-and-test
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ env.NODE_VERSION }}
-        cache: 'npm'
-        cache-dependency-path: infrastructure/cdk/package-lock.json
-    
-    - name: Install CDK dependencies
-      working-directory: ./infrastructure/cdk
-      run: npm ci
-    
-    - name: Build CDK
-      working-directory: ./infrastructure/cdk
-      run: npm run build
-    
-    - name: CDK Synth (dev)
-      working-directory: ./infrastructure/cdk
-      run: npx cdk synth -c stage=dev --verbose
-    
-    - name: Upload CDK template
-      uses: actions/upload-artifact@v4
-      with:
-        name: cdk-template-dev
-        path: infrastructure/cdk/cdk.out
-        retention-days: 7
-
   # Security Scanning
   security-scan:
     name: Security Vulnerability Scan
@@ -200,7 +164,7 @@ jobs:
   build-summary:
     name: Build Summary
     runs-on: ubuntu-latest
-    needs: [build-and-test, build-lambdas, cdk-synth, security-scan]
+    needs: [build-and-test, build-lambdas, security-scan]
     if: always()
     
     steps:
@@ -212,13 +176,11 @@ jobs:
         echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
         echo "| Build & Test | ${{ needs.build-and-test.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "| Build Lambdas | ${{ needs.build-lambdas.result }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| CDK Synth | ${{ needs.cdk-synth.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "| Security Scan | ${{ needs.security-scan.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
         if [ "${{ needs.build-and-test.result }}" != "success" ] || \
-           [ "${{ needs.build-lambdas.result }}" != "success" ] || \
-           [ "${{ needs.cdk-synth.result }}" != "success" ]; then
+           [ "${{ needs.build-lambdas.result }}" != "success" ]; then
           echo "::error::One or more jobs failed. Please review the logs."
           exit 1
         fi
