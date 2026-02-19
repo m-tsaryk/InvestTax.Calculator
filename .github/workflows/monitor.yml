@@ -1,0 +1,164 @@
+name: Monitor and Alert
+
+on:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to monitor'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+        default: prod
+
+env:
+  AWS_REGION: eu-central-1
+
+jobs:
+  health-check:
+    name: System Health Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Check Lambda Functions
+      id: lambda-check
+      run: |
+        ENVIRONMENT=${{ inputs.environment || 'prod' }}
+        echo "Checking Lambda functions for environment: $ENVIRONMENT"
+        
+        FUNCTIONS=$(aws lambda list-functions \
+          --query "Functions[?contains(FunctionName, 'InvestTax') && contains(FunctionName, '$ENVIRONMENT')].FunctionName" \
+          --output text)
+        
+        echo "functions_found=$(echo $FUNCTIONS | wc -w)" >> $GITHUB_OUTPUT
+        
+        echo "## Lambda Health Check :lambda:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Environment**: $ENVIRONMENT" >> $GITHUB_STEP_SUMMARY
+        echo "**Functions Found**: $(echo $FUNCTIONS | wc -w)" >> $GITHUB_STEP_SUMMARY
+    
+    - name: Check DynamoDB Tables
+      run: |
+        ENVIRONMENT=${{ inputs.environment || 'prod' }}
+        TABLES=$(aws dynamodb list-tables \
+          --query "TableNames[?contains(@, 'InvestTax') && contains(@, '$ENVIRONMENT')]" \
+          --output text)
+        
+        echo "## DynamoDB Health Check :database:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Tables Found**: $(echo $TABLES | wc -w)" >> $GITHUB_STEP_SUMMARY
+    
+    - name: Check Step Functions
+      run: |
+        ENVIRONMENT=${{ inputs.environment || 'prod' }}
+        STATE_MACHINES=$(aws stepfunctions list-state-machines \
+          --query "stateMachines[?contains(name, 'InvestTax') && contains(name, '$ENVIRONMENT')].name" \
+          --output text)
+        
+        echo "## Step Functions Health Check :gear:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**State Machines Found**: $(echo $STATE_MACHINES | wc -w)" >> $GITHUB_STEP_SUMMARY
+    
+    - name: Get Recent Errors
+      run: |
+        ENVIRONMENT=${{ inputs.environment || 'prod' }}
+        END_TIME=$(date -u +%s)000
+        START_TIME=$(($END_TIME - 21600000))  # 6 hours ago
+        
+        echo "## Recent Errors (Last 6 hours) :warning:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Check Lambda errors
+        for FUNC in $(aws lambda list-functions --query "Functions[?contains(FunctionName, 'InvestTax') && contains(FunctionName, '$ENVIRONMENT')].FunctionName" --output text); do
+          ERRORS=$(aws cloudwatch get-metric-statistics \
+            --namespace AWS/Lambda \
+            --metric-name Errors \
+            --dimensions Name=FunctionName,Value=$FUNC \
+            --start-time $(date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%S) \
+            --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+            --period 3600 \
+            --statistics Sum \
+            --query 'Datapoints[].Sum' \
+            --output text 2>/dev/null || echo "0")
+          
+          TOTAL_ERRORS=$(echo $ERRORS | awk '{s=0; for(i=1;i<=NF;i++) s+=$i; print s}')
+          
+          if [ "$TOTAL_ERRORS" != "0" ] && [ -n "$TOTAL_ERRORS" ]; then
+            echo "- **$FUNC**: $TOTAL_ERRORS errors" >> $GITHUB_STEP_SUMMARY
+          fi
+        done
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Health check completed at $(date -u)" >> $GITHUB_STEP_SUMMARY
+
+  performance-metrics:
+    name: Performance Metrics
+    runs-on: ubuntu-latest
+    needs: health-check
+    
+    steps:
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Get DORA Metrics
+      run: |
+        ENVIRONMENT=${{ inputs.environment || 'prod' }}
+        
+        echo "## DORA Metrics :chart_with_upwards_trend:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Lead Time for Changes**: Measuring from commit to production" >> $GITHUB_STEP_SUMMARY
+        echo "**Deployment Frequency**: Check CloudFormation stack update history" >> $GITHUB_STEP_SUMMARY
+        echo "**Change Failure Rate**: Monitor Step Functions execution failures" >> $GITHUB_STEP_SUMMARY
+        echo "**Time to Restore**: Average time from incident detection to resolution" >> $GITHUB_STEP_SUMMARY
+    
+    - name: Get Step Functions Execution Stats
+      run: |
+        ENVIRONMENT=${{ inputs.environment || 'prod' }}
+        
+        # Get state machine ARN
+        STATE_MACHINE_ARN=$(aws stepfunctions list-state-machines \
+          --query "stateMachines[?contains(name, 'InvestTax') && contains(name, '$ENVIRONMENT')].stateMachineArn" \
+          --output text | head -n1)
+        
+        if [ -n "$STATE_MACHINE_ARN" ]; then
+          echo "## Step Functions Execution Stats :repeat:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Get recent executions
+          EXECUTIONS=$(aws stepfunctions list-executions \
+            --state-machine-arn $STATE_MACHINE_ARN \
+            --max-results 100 \
+            --query 'executions[].status' \
+            --output text)
+          
+          TOTAL=$(echo $EXECUTIONS | wc -w)
+          SUCCEEDED=$(echo $EXECUTIONS | grep -o SUCCEEDED | wc -l)
+          FAILED=$(echo $EXECUTIONS | grep -o FAILED | wc -l)
+          
+          SUCCESS_RATE=$(awk "BEGIN {printf \"%.2f\", ($SUCCEEDED/$TOTAL)*100}")
+          
+          echo "- **Total Executions (last 100)**: $TOTAL" >> $GITHUB_STEP_SUMMARY
+          echo "- **Succeeded**: $SUCCEEDED" >> $GITHUB_STEP_SUMMARY
+          echo "- **Failed**: $FAILED" >> $GITHUB_STEP_SUMMARY
+          echo "- **Success Rate**: $SUCCESS_RATE%" >> $GITHUB_STEP_SUMMARY
+          
+          if [ $FAILED -gt 10 ]; then
+            echo "::warning::High failure rate detected: $FAILED failures in last 100 executions"
+          fi
+        fi

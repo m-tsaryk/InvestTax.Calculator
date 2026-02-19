@@ -4,7 +4,7 @@
 
 param(
     [Parameter(Mandatory=$false)]
-    [string]$BucketName = "investtax-upload-dev",
+    [string]$BucketName = "",
     
     [Parameter(Mandatory=$false)]
     [string]$Email = "test@example.com",
@@ -16,12 +16,45 @@ param(
     [string]$Region = "eu-central-1",
     
     [Parameter(Mandatory=$false)]
-    [string]$Profile = $null
+    [string]$Profile = $null,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$Local = $true
 )
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "InvestTax Calculator - Upload Test" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Configure for Local or AWS
+if ($Local) {
+    # LocalStack configuration
+    $endpoint = "http://localhost:4566"
+    if ([string]::IsNullOrEmpty($BucketName)) {
+        $BucketName = "investtax-upload-local"
+    }
+    
+    # Set dummy credentials for LocalStack
+    $env:AWS_ACCESS_KEY_ID = "test"
+    $env:AWS_SECRET_ACCESS_KEY = "test"
+    
+    # Disable AWS CLI v2 advanced features not supported by LocalStack
+    $env:AWS_S3_USE_SIGV4 = "true"
+    $env:AWS_CLI_FILE_ENCODING = "utf-8"
+    
+    Write-Host "Mode: LOCAL (LocalStack)" -ForegroundColor Yellow
+    Write-Host "Endpoint: $endpoint" -ForegroundColor Gray
+}
+else {
+    # Real AWS configuration
+    $endpoint = $null
+    if ([string]::IsNullOrEmpty($BucketName)) {
+        $BucketName = "investtax-upload-dev"
+    }
+    
+    Write-Host "Mode: AWS (Real)" -ForegroundColor Yellow
+}
 Write-Host ""
 
 # Validate CSV file exists
@@ -50,22 +83,32 @@ Write-Host "  S3 Key:       $s3Key"
 Write-Host "  Region:       $Region"
 Write-Host ""
 
-# Build AWS CLI command
-$awsCommand = "aws s3 cp `"$CsvFile`" `"s3://$BucketName/$s3Key`" --region $Region"
-
-if ($Profile) {
-    $awsCommand += " --profile $Profile"
-    Write-Host "  Profile:      $Profile"
-}
-
-Write-Host ""
 Write-Host "Uploading file to S3..." -ForegroundColor Yellow
 
 try {
-    # Execute upload
-    Invoke-Expression $awsCommand
+    if ($Local) {
+        # For LocalStack, use direct HTTP PUT to avoid AWS CLI v2 checksum issues
+        $fileContent = [System.IO.File]::ReadAllBytes((Resolve-Path $CsvFile).Path)
+        $uri = "$endpoint/$BucketName/$s3Key"
+        
+        $headers = @{
+            "Content-Type" = "text/csv"
+        }
+        
+        Invoke-RestMethod -Uri $uri -Method Put -Body $fileContent -Headers $headers -ErrorAction Stop | Out-Null
+        $uploadSuccess = $true
+    }
+    else {
+        # For real AWS, use standard AWS CLI
+        $awsCommand = "aws s3 cp `"$CsvFile`" `"s3://$BucketName/$s3Key`" --region $Region"
+        if ($Profile) {
+            $awsCommand += " --profile $Profile"
+        }
+        Invoke-Expression $awsCommand
+        $uploadSuccess = ($LASTEXITCODE -eq 0)
+    }
     
-    if ($LASTEXITCODE -eq 0) {
+    if ($uploadSuccess) {
         Write-Host ""
         Write-Host "========================================" -ForegroundColor Green
         Write-Host "Upload Successful!" -ForegroundColor Green

@@ -18,7 +18,7 @@ try {
         Write-Host "Please start Docker Desktop and try again." -ForegroundColor Red
         exit 1
     }
-    Write-Host "✓ Docker is running" -ForegroundColor Green
+    Write-Host "[OK] Docker is running" -ForegroundColor Green
 }
 catch {
     Write-Host "ERROR: Docker is not installed or not in PATH!" -ForegroundColor Red
@@ -34,7 +34,7 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Host "✓ LocalStack containers started" -ForegroundColor Green
+Write-Host "[OK] LocalStack containers started" -ForegroundColor Green
 
 # Wait for LocalStack to be ready
 Write-Host "`nWaiting for LocalStack to be ready..." -ForegroundColor Yellow
@@ -60,8 +60,9 @@ while ($retryCount -lt $maxRetries -and -not $localstackReady) {
 }
 
 if ($localstackReady) {
-    Write-Host "✓ LocalStack is ready" -ForegroundColor Green
-} else {
+    Write-Host "[OK] LocalStack is ready" -ForegroundColor Green
+}
+else {
     Write-Host "WARNING: LocalStack may not be fully ready yet. Continuing anyway..." -ForegroundColor Yellow
 }
 
@@ -70,20 +71,22 @@ if (-not $SkipInit) {
     Write-Host "`nInitializing AWS resources..." -ForegroundColor Yellow
     
     # Check if AWS CLI is installed
-    $awsInstalled = Get-Command aws -ErrorAction SilentlyContinue
-    if ($null -eq $awsInstalled) {
-        Write-Host "WARNING: AWS CLI is not installed!" -ForegroundColor Yellow
-        Write-Host "Skipping AWS resource initialization." -ForegroundColor Yellow
-        Write-Host "Please install AWS CLI and run: .\infrastructure\localstack-init.ps1" -ForegroundColor Yellow
-    } else {
+    try {
+        $awsInstalled = Get-Command aws -ErrorAction Stop
         & "$PSScriptRoot\..\infrastructure\localstack-init.ps1"
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "✓ AWS resources initialized" -ForegroundColor Green
+            Write-Host "[OK] AWS resources initialized" -ForegroundColor Green
         } else {
             Write-Host "WARNING: Some AWS resources may not have been initialized properly" -ForegroundColor Yellow
         }
     }
-} else {
+    catch {
+        Write-Host "WARNING: AWS CLI is not installed!" -ForegroundColor Yellow
+        Write-Host "Skipping AWS resource initialization." -ForegroundColor Yellow
+        Write-Host "Please install AWS CLI and run: .\infrastructure\localstack-init.ps1" -ForegroundColor Yellow
+    }
+}
+else {
     Write-Host "`nSkipping AWS resource initialization (use -SkipInit to skip)" -ForegroundColor Gray
 }
 
