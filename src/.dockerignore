@@ -1,0 +1,43 @@
+# Ignore build outputs
+**/bin/
+**/obj/
+**/publish/
+
+# Ignore test files
+**/test-data/
+**/tests/
+
+# Ignore documentation
+**/*.md
+**/docs/
+
+# Ignore infrastructure
+**/infrastructure/
+**/scripts/
+
+# Ignore IDE files
+**/.vs/
+**/.vscode/
+**/*.user
+**/*.suo
+
+# Ignore Docker files
+**/Dockerfile
+**/.dockerignore
+
+# Ignore git
+**/.git/
+**/.gitignore
+**/.gitattributes
+
+# Ignore LocalStack data
+**/localstack-data/
+
+# Ignore node modules
+**/node_modules/
+
+# Ignore temporary files
+**/.DS_Store
+**/Thumbs.db
+**/*.tmp
+**/*.temp

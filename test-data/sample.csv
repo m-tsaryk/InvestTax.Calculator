@@ -1,0 +1,3 @@
+Action|Time|ISIN|Ticker|Name|No. of shares|Price / share|Currency symbol|Exchange rate|Result|Total|Notes
+Buy|2024-01-15 10:30:00|US0378331005|AAPL|Apple Inc.|10|150.00|USD|3.95|1500.00|5925.00|Initial purchase
+Sell|2024-06-20 14:45:00|US0378331005|AAPL|Apple Inc.|10|180.00|USD|4.10|1800.00|7380.00|Sale for profit

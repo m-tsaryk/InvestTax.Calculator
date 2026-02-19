@@ -1,0 +1,750 @@
+{
+  "Comment": "InvestTax Calculator Tax Calculation Workflow - MVP Phase 1",
+  "StartAt": "ExtractMetadata",
+  "States": {
+    "ExtractMetadata": {
+      "Type": "Pass",
+      "Comment": "Extract metadata from input and prepare for processing",
+      "Parameters": {
+        "JobId.$": "$.JobId",
+        "Email.$": "$.Email",
+        "S3Key.$": "$.S3Key",
+        "UploadBucket.$": "$.UploadBucket",
+        "ProcessingBucket.$": "$.ProcessingBucket",
+        "Status": "Processing",
+        "Stage": "Validation"
+      },
+      "ResultPath": "$",
+      "Next": "UpdateJobProcessing"
+    },
+    "UpdateJobProcessing": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JOBS_TABLE}",
+        "Key": {
+          "JobId": {
+            "S.$": "$.JobId"
+          }
+        },
+        "UpdateExpression": "SET #status = :status, #stage = :stage, #updatedAt = :updatedAt",
+        "ExpressionAttributeNames": {
+          "#status": "Status",
+          "#stage": "Stage",
+          "#updatedAt": "UpdatedAt"
+        },
+        "ExpressionAttributeValues": {
+          ":status": {
+            "S": "Processing"
+          },
+          ":stage": {
+            "S": "Validation"
+          },
+          ":updatedAt": {
+            "S.$": "$$.State.EnteredTime"
+          }
+        }
+      },
+      "ResultPath": "$.DynamoDbResult",
+      "Next": "ValidateCSV",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "UpdateJobFailed"
+        }
+      ]
+    },
+    "ValidateCSV": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${VALIDATOR_FUNCTION}",
+        "Payload": {
+          "JobId.$": "$.JobId",
+          "Email.$": "$.Email",
+          "S3Key.$": "$.S3Key",
+          "UploadBucket.$": "$.UploadBucket",
+          "ProcessingBucket.$": "$.ProcessingBucket"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "ResultSelector": {
+        "JobId.$": "$.Payload.JobId",
+        "Email.$": "$.Payload.Email",
+        "IsValid.$": "$.Payload.IsValid",
+        "ValidationErrors.$": "$.Payload.ValidationErrors",
+        "ValidatedFileKey.$": "$.Payload.ValidatedFileKey",
+        "ProcessingBucket.$": "$.Payload.ProcessingBucket",
+        "RowCount.$": "$.Payload.RowCount",
+        "Currencies.$": "$.Payload.Currencies"
+      },
+      "ResultPath": "$",
+      "Next": "CheckValidationResult",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "SendValidationErrorEmail"
+        }
+      ]
+    },
+    "CheckValidationResult": {
+      "Type": "Choice",
+      "Comment": "Check if CSV validation was successful",
+      "Choices": [
+        {
+          "Variable": "$.IsValid",
+          "BooleanEquals": true,
+          "Next": "UpdateJobNormalizing"
+        }
+      ],
+      "Default": "SendValidationErrorEmail"
+    },
+    "UpdateJobNormalizing": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JOBS_TABLE}",
+        "Key": {
+          "JobId": {
+            "S.$": "$.JobId"
+          }
+        },
+        "UpdateExpression": "SET #stage = :stage, #updatedAt = :updatedAt, #rowCount = :rowCount",
+        "ExpressionAttributeNames": {
+          "#stage": "Stage",
+          "#updatedAt": "UpdatedAt",
+          "#rowCount": "RowCount"
+        },
+        "ExpressionAttributeValues": {
+          ":stage": {
+            "S": "Normalizing"
+          },
+          ":updatedAt": {
+            "S.$": "$$.State.EnteredTime"
+          },
+          ":rowCount": {
+            "N.$": "States.Format('{}', $.RowCount)"
+          }
+        }
+      },
+      "ResultPath": "$.DynamoDbResult",
+      "Next": "NormalizeData",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "UpdateJobFailed"
+        }
+      ]
+    },
+    "NormalizeData": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${NORMALIZER_FUNCTION}",
+        "Payload": {
+          "JobId.$": "$.JobId",
+          "Email.$": "$.Email",
+          "ValidatedFileKey.$": "$.ValidatedFileKey",
+          "ProcessingBucket.$": "$.ProcessingBucket"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "ResultSelector": {
+        "JobId.$": "$.Payload.JobId",
+        "Email.$": "$.Payload.Email",
+        "NormalizedDataKey.$": "$.Payload.NormalizedDataKey",
+        "ProcessingBucket.$": "$.Payload.ProcessingBucket",
+        "TransactionCount.$": "$.Payload.TransactionCount",
+        "UniqueDates.$": "$.Payload.UniqueDates",
+        "Currencies.$": "$.Payload.Currencies"
+      },
+      "ResultPath": "$",
+      "Next": "UpdateJobFetchingRates",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "SendProcessingErrorEmail"
+        }
+      ]
+    },
+    "UpdateJobFetchingRates": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JOBS_TABLE}",
+        "Key": {
+          "JobId": {
+            "S.$": "$.JobId"
+          }
+        },
+        "UpdateExpression": "SET #stage = :stage, #updatedAt = :updatedAt, #transactionCount = :transactionCount",
+        "ExpressionAttributeNames": {
+          "#stage": "Stage",
+          "#updatedAt": "UpdatedAt",
+          "#transactionCount": "TransactionCount"
+        },
+        "ExpressionAttributeValues": {
+          ":stage": {
+            "S": "FetchingRates"
+          },
+          ":updatedAt": {
+            "S.$": "$$.State.EnteredTime"
+          },
+          ":transactionCount": {
+            "N.$": "States.Format('{}', $.TransactionCount)"
+          }
+        }
+      },
+      "ResultPath": "$.DynamoDbResult",
+      "Next": "FetchNBPRates",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "UpdateJobFailed"
+        }
+      ]
+    },
+    "FetchNBPRates": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${NBP_CLIENT_FUNCTION}",
+        "Payload": {
+          "JobId.$": "$.JobId",
+          "Email.$": "$.Email",
+          "NormalizedDataKey.$": "$.NormalizedDataKey",
+          "ProcessingBucket.$": "$.ProcessingBucket",
+          "UniqueDates.$": "$.UniqueDates",
+          "Currencies.$": "$.Currencies"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "ResultSelector": {
+        "JobId.$": "$.Payload.JobId",
+        "Email.$": "$.Payload.Email",
+        "NormalizedDataKey.$": "$.Payload.NormalizedDataKey",
+        "RateMapKey.$": "$.Payload.RateMapKey",
+        "ProcessingBucket.$": "$.Payload.ProcessingBucket",
+        "RatesFetchedCount.$": "$.Payload.RatesFetchedCount"
+      },
+      "ResultPath": "$",
+      "Next": "CheckRatesFetched",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "SendRateErrorEmail"
+        }
+      ]
+    },
+    "CheckRatesFetched": {
+      "Type": "Choice",
+      "Comment": "Verify all required rates were fetched",
+      "Choices": [
+        {
+          "Variable": "$.RatesFetchedCount",
+          "NumericGreaterThan": 0,
+          "Next": "UpdateJobCalculating"
+        }
+      ],
+      "Default": "SendRateErrorEmail"
+    },
+    "UpdateJobCalculating": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JOBS_TABLE}",
+        "Key": {
+          "JobId": {
+            "S.$": "$.JobId"
+          }
+        },
+        "UpdateExpression": "SET #stage = :stage, #updatedAt = :updatedAt",
+        "ExpressionAttributeNames": {
+          "#stage": "Stage",
+          "#updatedAt": "UpdatedAt"
+        },
+        "ExpressionAttributeValues": {
+          ":stage": {
+            "S": "Calculating"
+          },
+          ":updatedAt": {
+            "S.$": "$$.State.EnteredTime"
+          }
+        }
+      },
+      "ResultPath": "$.DynamoDbResult",
+      "Next": "CalculateTax",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "UpdateJobFailed"
+        }
+      ]
+    },
+    "CalculateTax": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${CALCULATOR_FUNCTION}",
+        "Payload": {
+          "JobId.$": "$.JobId",
+          "Email.$": "$.Email",
+          "NormalizedDataKey.$": "$.NormalizedDataKey",
+          "RateMapKey.$": "$.RateMapKey",
+          "ProcessingBucket.$": "$.ProcessingBucket"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "ResultSelector": {
+        "JobId.$": "$.Payload.JobId",
+        "Email.$": "$.Payload.Email",
+        "CalculationResultKey.$": "$.Payload.CalculationResultKey",
+        "ProcessingBucket.$": "$.Payload.ProcessingBucket",
+        "TotalGainPLN.$": "$.Payload.TotalGainPLN",
+        "TotalTaxPLN.$": "$.Payload.TotalTaxPLN",
+        "MatchedTransactions.$": "$.Payload.MatchedTransactions"
+      },
+      "ResultPath": "$",
+      "Next": "UpdateJobGeneratingReport",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "SendProcessingErrorEmail"
+        }
+      ]
+    },
+    "UpdateJobGeneratingReport": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JOBS_TABLE}",
+        "Key": {
+          "JobId": {
+            "S.$": "$.JobId"
+          }
+        },
+        "UpdateExpression": "SET #stage = :stage, #updatedAt = :updatedAt, #totalGainPLN = :totalGainPLN, #totalTaxPLN = :totalTaxPLN",
+        "ExpressionAttributeNames": {
+          "#stage": "Stage",
+          "#updatedAt": "UpdatedAt",
+          "#totalGainPLN": "TotalGainPLN",
+          "#totalTaxPLN": "TotalTaxPLN"
+        },
+        "ExpressionAttributeValues": {
+          ":stage": {
+            "S": "GeneratingReport"
+          },
+          ":updatedAt": {
+            "S.$": "$$.State.EnteredTime"
+          },
+          ":totalGainPLN": {
+            "N.$": "States.Format('{}', $.TotalGainPLN)"
+          },
+          ":totalTaxPLN": {
+            "N.$": "States.Format('{}', $.TotalTaxPLN)"
+          }
+        }
+      },
+      "ResultPath": "$.DynamoDbResult",
+      "Next": "GenerateReport",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "UpdateJobFailed"
+        }
+      ]
+    },
+    "GenerateReport": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${REPORT_GENERATOR_FUNCTION}",
+        "Payload": {
+          "JobId.$": "$.JobId",
+          "Email.$": "$.Email",
+          "CalculationResultKey.$": "$.CalculationResultKey",
+          "ProcessingBucket.$": "$.ProcessingBucket",
+          "TotalGainPLN.$": "$.TotalGainPLN",
+          "TotalTaxPLN.$": "$.TotalTaxPLN"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "ResultSelector": {
+        "JobId.$": "$.Payload.JobId",
+        "Email.$": "$.Payload.Email",
+        "TextReportKey.$": "$.Payload.TextReportKey",
+        "ProcessingBucket.$": "$.Payload.ProcessingBucket",
+        "TotalGainPLN.$": "$.Payload.TotalGainPLN",
+        "TotalTaxPLN.$": "$.Payload.TotalTaxPLN"
+      },
+      "ResultPath": "$",
+      "Next": "UpdateJobSendingEmail",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "SendProcessingErrorEmail"
+        }
+      ]
+    },
+    "UpdateJobSendingEmail": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JOBS_TABLE}",
+        "Key": {
+          "JobId": {
+            "S.$": "$.JobId"
+          }
+        },
+        "UpdateExpression": "SET #stage = :stage, #updatedAt = :updatedAt, #reportKey = :reportKey",
+        "ExpressionAttributeNames": {
+          "#stage": "Stage",
+          "#updatedAt": "UpdatedAt",
+          "#reportKey": "ReportKey"
+        },
+        "ExpressionAttributeValues": {
+          ":stage": {
+            "S": "SendingEmail"
+          },
+          ":updatedAt": {
+            "S.$": "$$.State.EnteredTime"
+          },
+          ":reportKey": {
+            "S.$": "$.TextReportKey"
+          }
+        }
+      },
+      "ResultPath": "$.DynamoDbResult",
+      "Next": "SendEmail",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "UpdateJobFailed"
+        }
+      ]
+    },
+    "SendEmail": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${EMAIL_SENDER_FUNCTION}",
+        "Payload": {
+          "JobId.$": "$.JobId",
+          "Email.$": "$.Email",
+          "TextReportKey.$": "$.TextReportKey",
+          "ProcessingBucket.$": "$.ProcessingBucket",
+          "TotalGainPLN.$": "$.TotalGainPLN",
+          "TotalTaxPLN.$": "$.TotalTaxPLN",
+          "IsSuccess": true
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "ResultPath": "$.EmailResult",
+      "Next": "UpdateJobSuccess",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "UpdateJobFailed"
+        }
+      ]
+    },
+    "UpdateJobSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JOBS_TABLE}",
+        "Key": {
+          "JobId": {
+            "S.$": "$.JobId"
+          }
+        },
+        "UpdateExpression": "SET #status = :status, #stage = :stage, #updatedAt = :updatedAt, #completedAt = :completedAt",
+        "ExpressionAttributeNames": {
+          "#status": "Status",
+          "#stage": "Stage",
+          "#updatedAt": "UpdatedAt",
+          "#completedAt": "CompletedAt"
+        },
+        "ExpressionAttributeValues": {
+          ":status": {
+            "S": "Completed"
+          },
+          ":stage": {
+            "S": "Completed"
+          },
+          ":updatedAt": {
+            "S.$": "$$.State.EnteredTime"
+          },
+          ":completedAt": {
+            "S.$": "$$.State.EnteredTime"
+          }
+        }
+      },
+      "ResultPath": "$.DynamoDbResult",
+      "Next": "JobSucceeded"
+    },
+    "JobSucceeded": {
+      "Type": "Succeed",
+      "Comment": "Job completed successfully"
+    },
+    "SendValidationErrorEmail": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${EMAIL_SENDER_FUNCTION}",
+        "Payload": {
+          "JobId.$": "$.JobId",
+          "Email.$": "$.Email",
+          "IsSuccess": false,
+          "ErrorType": "ValidationError",
+          "ErrorMessage.$": "$.ValidationErrors"
+        }
+      },
+      "ResultPath": "$.EmailResult",
+      "Next": "UpdateJobFailedValidation",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.emailError",
+          "Next": "UpdateJobFailedValidation"
+        }
+      ]
+    },
+    "SendRateErrorEmail": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${EMAIL_SENDER_FUNCTION}",
+        "Payload": {
+          "JobId.$": "$.JobId",
+          "Email.$": "$.Email",
+          "IsSuccess": false,
+          "ErrorType": "RateFetchError",
+          "ErrorMessage": "Failed to fetch exchange rates from NBP API. Please try again later."
+        }
+      },
+      "ResultPath": "$.EmailResult",
+      "Next": "UpdateJobFailedRate",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.emailError",
+          "Next": "UpdateJobFailedRate"
+        }
+      ]
+    },
+    "SendProcessingErrorEmail": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${EMAIL_SENDER_FUNCTION}",
+        "Payload": {
+          "JobId.$": "$.JobId",
+          "Email.$": "$.Email",
+          "IsSuccess": false,
+          "ErrorType": "ProcessingError",
+          "ErrorMessage.$": "States.Format('An error occurred during processing: {}', $.error.Cause)"
+        }
+      },
+      "ResultPath": "$.EmailResult",
+      "Next": "UpdateJobFailed",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.emailError",
+          "Next": "UpdateJobFailed"
+        }
+      ]
+    },
+    "UpdateJobFailedValidation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JOBS_TABLE}",
+        "Key": {
+          "JobId": {
+            "S.$": "$.JobId"
+          }
+        },
+        "UpdateExpression": "SET #status = :status, #stage = :stage, #updatedAt = :updatedAt, #errorMessage = :errorMessage",
+        "ExpressionAttributeNames": {
+          "#status": "Status",
+          "#stage": "Stage",
+          "#updatedAt": "UpdatedAt",
+          "#errorMessage": "ErrorMessage"
+        },
+        "ExpressionAttributeValues": {
+          ":status": {
+            "S": "Failed"
+          },
+          ":stage": {
+            "S": "Validation"
+          },
+          ":updatedAt": {
+            "S.$": "$$.State.EnteredTime"
+          },
+          ":errorMessage": {
+            "S": "CSV validation failed. Check your file format and data."
+          }
+        }
+      },
+      "ResultPath": "$.DynamoDbResult",
+      "Next": "JobFailed"
+    },
+    "UpdateJobFailedRate": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JOBS_TABLE}",
+        "Key": {
+          "JobId": {
+            "S.$": "$.JobId"
+          }
+        },
+        "UpdateExpression": "SET #status = :status, #stage = :stage, #updatedAt = :updatedAt, #errorMessage = :errorMessage",
+        "ExpressionAttributeNames": {
+          "#status": "Status",
+          "#stage": "Stage",
+          "#updatedAt": "UpdatedAt",
+          "#errorMessage": "ErrorMessage"
+        },
+        "ExpressionAttributeValues": {
+          ":status": {
+            "S": "Failed"
+          },
+          ":stage": {
+            "S": "FetchingRates"
+          },
+          ":updatedAt": {
+            "S.$": "$$.State.EnteredTime"
+          },
+          ":errorMessage": {
+            "S": "Failed to fetch exchange rates from NBP API"
+          }
+        }
+      },
+      "ResultPath": "$.DynamoDbResult",
+      "Next": "JobFailed"
+    },
+    "UpdateJobFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${JOBS_TABLE}",
+        "Key": {
+          "JobId": {
+            "S.$": "$.JobId"
+          }
+        },
+        "UpdateExpression": "SET #status = :status, #updatedAt = :updatedAt, #errorMessage = :errorMessage",
+        "ExpressionAttributeNames": {
+          "#status": "Status",
+          "#updatedAt": "UpdatedAt",
+          "#errorMessage": "ErrorMessage"
+        },
+        "ExpressionAttributeValues": {
+          ":status": {
+            "S": "Failed"
+          },
+          ":updatedAt": {
+            "S.$": "$$.State.EnteredTime"
+          },
+          ":errorMessage": {
+            "S.$": "States.Format('Processing error: {}', $.error.Cause)"
+          }
+        }
+      },
+      "ResultPath": "$.DynamoDbResult",
+      "Next": "JobFailed",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "JobFailed"
+        }
+      ]
+    },
+    "JobFailed": {
+      "Type": "Fail",
+      "Cause": "Job processing failed",
+      "Error": "ProcessingError"
+    }
+  }
+}

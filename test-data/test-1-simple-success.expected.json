@@ -1,0 +1,25 @@
+{
+  "testName": "test-1-simple-success",
+  "description": "Simple buy and sell of Apple stock with profit",
+  "shouldSucceed": true,
+  "expectedOutcome": {
+    "totalGainPLN": 1455.00,
+    "totalTaxPLN": 276.45,
+    "matchedTransactions": 1,
+    "transactionDetails": [
+      {
+        "isin": "US0378331005",
+        "ticker": "AAPL",
+        "buyDate": "2024-01-15",
+        "sellDate": "2024-06-20",
+        "quantity": 10,
+        "buyPriceUSD": 150.00,
+        "sellPriceUSD": 180.00,
+        "gainUSD": 300.00,
+        "buyExchangeRate": 3.95,
+        "sellExchangeRate": 4.10,
+        "gainPLN": 1455.00
+      }
+    ]
+  }
+}

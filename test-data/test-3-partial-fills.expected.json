@@ -1,0 +1,11 @@
+{
+  "testName": "test-3-partial-fills",
+  "description": "FIFO algorithm with partial fills across multiple buy/sell cycles",
+  "shouldSucceed": true,
+  "expectedOutcome": {
+    "totalGainPLN": "calculated at runtime",
+    "totalTaxPLN": "calculated at runtime",
+    "matchedTransactions": 3,
+    "notes": "Tests complex FIFO scenario where sells partially consume multiple buy lots"
+  }
+}
