@@ -40,40 +40,39 @@ foreach ($lambda in $lambdaFunctions) {
     
     Write-Host "Building $lambdaName..." -ForegroundColor Yellow
     Write-Host "  Image: $imageName" -ForegroundColor Gray
+    Write-Host ""
     
-    try {
-        Push-Location $srcDir
-        
-        $dockerFile = "InvestTax.Lambda.$lambdaName\Dockerfile"
-        
-        if (-not (Test-Path $dockerFile)) {
-            Write-Host "  [FAIL] Dockerfile not found: $dockerFile" -ForegroundColor Red
-            $failCount++
-            continue
-        }
-        
-        # Build Docker image
-        docker build `
-            -f $dockerFile `
-            -t "${imageName}:latest" `
-            -t "${imageName}:local" `
-            @buildArgs `
-            . 2>&1 | Out-Null
-        
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  [OK] Built successfully" -ForegroundColor Green
-            $successCount++
-        } else {
-            Write-Host "  [FAIL] Build failed" -ForegroundColor Red
-            $failCount++
-        }
-    }
-    catch {
-        Write-Host "  [FAIL] Error: $($_.Exception.Message)" -ForegroundColor Red
-        $failCount++
-    }
-    finally {
+    Push-Location $srcDir
+    
+    $dockerFile = "InvestTax.Lambda.$lambdaName\Dockerfile"
+    
+    if (-not (Test-Path $dockerFile)) {
+        Write-Host "  [FAIL] Dockerfile not found: $dockerFile" -ForegroundColor Red
         Pop-Location
+        $failCount++
+        Write-Host ""
+        continue
+    }
+    
+    # Build Docker image
+    docker build `
+        -f $dockerFile `
+        -t "${imageName}:latest" `
+        -t "${imageName}:local" `
+        @buildArgs `
+        .
+    
+    $buildExitCode = $LASTEXITCODE
+    Pop-Location
+    
+    if ($buildExitCode -eq 0) {
+        Write-Host ""
+        Write-Host "  [OK] $lambdaName built successfully" -ForegroundColor Green
+        $successCount++
+    } else {
+        Write-Host ""
+        Write-Host "  [FAIL] $lambdaName build failed (Exit code: $buildExitCode)" -ForegroundColor Red
+        $failCount++
     }
     
     Write-Host ""

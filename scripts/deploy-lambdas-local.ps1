@@ -27,6 +27,40 @@ catch {
 
 Write-Host ""
 
+# Create IAM role for Lambda first (LocalStack doesn't enforce permissions)
+Write-Host "Creating IAM role for Lambda..." -ForegroundColor Yellow
+
+$trustPolicy = @"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "lambda.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+"@
+
+$ErrorActionPreference = "SilentlyContinue"
+$null = aws --endpoint-url=$endpoint iam create-role `
+    --role-name lambda-role `
+    --assume-role-policy-document $trustPolicy `
+    --region $region 2>&1
+$roleCreateExitCode = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+
+if ($roleCreateExitCode -eq 0) {
+    Write-Host "  [OK] IAM role created" -ForegroundColor Green
+} else {
+    Write-Host "  [INFO] Role might already exist" -ForegroundColor Gray
+}
+
+Write-Host ""
+
 # Lambda functions configuration
 $lambdaFunctions = @(
     @{ 
@@ -123,83 +157,54 @@ foreach ($lambda in $lambdaFunctions) {
     $functionName = $lambda.Name
     Write-Host "Deploying $functionName..." -ForegroundColor Yellow
     
-    try {
-        # Check if function already exists
-        $existingFunction = aws --endpoint-url=$endpoint lambda get-function `
+    # Check if function already exists and delete it
+    $ErrorActionPreference = "SilentlyContinue"
+    $null = aws --endpoint-url=$endpoint lambda get-function `
+        --function-name $functionName `
+        --region $region 2>&1
+    $functionExists = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = "Stop"
+    
+    if ($functionExists) {
+        Write-Host "  Function exists, deleting..." -ForegroundColor Gray
+        $null = aws --endpoint-url=$endpoint lambda delete-function `
             --function-name $functionName `
             --region $region 2>&1
-        
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  Function exists, deleting..." -ForegroundColor Gray
-            aws --endpoint-url=$endpoint lambda delete-function `
-                --function-name $functionName `
-                --region $region 2>&1 | Out-Null
-            Start-Sleep -Seconds 2
-        }
-        
-        # Convert environment variables to JSON
-        $envVars = @{ Variables = $lambda.Environment } | ConvertTo-Json -Compress -Depth 10
-        
-        # Create Lambda function with container image
-        Write-Host "  Creating function..." -ForegroundColor Gray
-        
-        $createResult = aws --endpoint-url=$endpoint lambda create-function `
-            --function-name $functionName `
-            --package-type Image `
-            --code "ImageUri=$($lambda.Image)" `
-            --role $lambda.Role `
-            --timeout $lambda.Timeout `
-            --memory-size $lambda.Memory `
-            --environment $envVars `
-            --region $region 2>&1
-        
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  [OK] Deployed successfully" -ForegroundColor Green
-            $successCount++
-        } else {
-            Write-Host "  [FAIL] Deployment failed" -ForegroundColor Red
-            Write-Host "  Error: $createResult" -ForegroundColor Red
-            $failCount++
-        }
+        Start-Sleep -Seconds 2
     }
-    catch {
-        Write-Host "  [FAIL] Error: $($_.Exception.Message)" -ForegroundColor Red
+    
+    # Convert environment variables to JSON
+    $envVars = @{ Variables = $lambda.Environment } | ConvertTo-Json -Compress -Depth 10
+    
+    # Create Lambda function with container image
+    Write-Host "  Creating function with image $($lambda.Image)..." -ForegroundColor Gray
+    
+    $ErrorActionPreference = "SilentlyContinue"
+    $createResult = aws --endpoint-url=$endpoint lambda create-function `
+        --function-name $functionName `
+        --package-type Image `
+        --code "ImageUri=$($lambda.Image)" `
+        --role $lambda.Role `
+        --timeout $lambda.Timeout `
+        --memory-size $lambda.Memory `
+        --environment $envVars `
+        --region $region 2>&1
+    $createExitCode = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    
+    if ($createExitCode -eq 0) {
+        Write-Host "  [OK] Deployed successfully" -ForegroundColor Green
+        $successCount++
+    } else {
+        Write-Host "  [FAIL] Deployment failed (Exit code: $createExitCode)" -ForegroundColor Red
+        if ($createResult) {
+            $createResult | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        }
         $failCount++
     }
     
     Write-Host ""
 }
-
-# Create IAM role for Lambda (LocalStack doesn't enforce permissions)
-Write-Host "Creating IAM role for Lambda..." -ForegroundColor Yellow
-try {
-    $trustPolicy = @"
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "lambda.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-"@
-    
-    aws --endpoint-url=$endpoint iam create-role `
-        --role-name lambda-role `
-        --assume-role-policy-document $trustPolicy `
-        --region $region 2>&1 | Out-Null
-    
-    Write-Host "  [OK] IAM role created" -ForegroundColor Green
-}
-catch {
-    Write-Host "  [INFO] Role might already exist" -ForegroundColor Gray
-}
-
-Write-Host ""
 
 # Summary
 Write-Host "========================================" -ForegroundColor Cyan
